@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kampe-telegram-2fa"
+version = "1.0.0"
+description = "Telegram as a second authentication factor. Framework-agnostic, zero runtime dependencies."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Joseph Uruetse", email = "support@getkampe.com" }]
+keywords = ["telegram", "2fa", "mfa", "two-factor", "authentication", "otp", "kampe"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+
+# None. The protocol needs a CSPRNG, an HMAC and an HTTP POST, and the standard
+# library has all three.
+dependencies = []
+
+[project.optional-dependencies]
+redis = ["redis>=4.2"]
+
+[project.urls]
+Homepage = "https://github.com/getkampe/telegram-2fa"
+Source = "https://github.com/getkampe/telegram-2fa"
+Issues = "https://github.com/getkampe/telegram-2fa/issues"
+Specification = "https://github.com/getkampe/telegram-2fa/blob/main/SPEC.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kampe_telegram_2fa"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md"]
