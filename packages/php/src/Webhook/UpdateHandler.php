@@ -82,12 +82,39 @@ final class UpdateHandler
      */
     public function handle(array $update): bool
     {
-        if ($this->isDuplicate($update)) {
+        $claim = $this->claim($update);
+
+        if ($claim === false) {
             return false;
         }
 
-        // Only private chats. A bot added to a group would otherwise hand out
-        // codes in front of every member of it.
+        try {
+            $handled = $this->dispatch($update);
+        } catch (\Throwable $e) {
+            // Release the claim so that Telegram's retry is processed rather
+            // than discarded as a duplicate. Marking an update done before its
+            // work succeeds turns one transient failure into a permanently lost
+            // operation.
+            if ($claim !== null) {
+                $this->store->forget($claim);
+            }
+
+            throw $e;
+        }
+
+        // Only now is it really handled, so hold the claim for the full window.
+        if ($claim !== null) {
+            $this->store->put($claim, 'done', $this->config->updateDedupeTtl);
+        }
+
+        return $handled;
+    }
+
+    /**
+     * @param  array<string, mixed>  $update
+     */
+    private function dispatch(array $update): bool
+    {
         if (isset($update['callback_query'])) {
             return $this->handleCallback($update['callback_query']);
         }
@@ -330,34 +357,45 @@ final class UpdateHandler
     }
 
     /**
-     * Telegram retries an update it believes was not delivered, so the same
-     * update_id can arrive more than once. Without this guard a retried /code
-     * would mint a second code and reset the cooldown.
+     * Claim an update, so that exactly one attempt processes it.
+     *
+     * Telegram retries an update it believes was not delivered, and delivers
+     * concurrently, so the same update_id can arrive more than once and at the
+     * same time. Without a claim a retried /code mints a second code and resets
+     * the cooldown.
+     *
+     * add() is the whole mechanism: checking for a marker and then writing one
+     * is two operations, and two simultaneous deliveries both find nothing and
+     * both proceed.
      *
      * @param  array<string, mixed>  $update
+     * @return string|false|null The claim key to settle, false when this update
+     *                           is already claimed, null when deduplication is
+     *                           off or the update carries no id.
      */
-    private function isDuplicate(array $update): bool
+    private function claim(array $update): string|false|null
     {
         if (! $this->config->dedupeUpdates) {
-            return false;
+            return null;
         }
 
         $updateId = $update['update_id'] ?? null;
 
         if (! is_int($updateId) && ! is_string($updateId)) {
-            return false;
+            return null;
         }
 
         $key = $this->config->key('update', (string) $updateId);
 
-        if ($this->store->get($key) !== null) {
+        // A short claim, not the full window: if this process dies mid-handling
+        // the claim lapses on its own and a later retry can pick the update up,
+        // rather than it being lost until the dedupe window expires.
+        if (! $this->store->add($key, 'claimed', max(30, min(120, $this->config->updateDedupeTtl)))) {
             $this->logger->info('telegram-2fa: duplicate update dropped', ['update_id' => $updateId]);
 
-            return true;
+            return false;
         }
 
-        $this->store->put($key, 1, $this->config->updateDedupeTtl);
-
-        return false;
+        return $key;
     }
 }

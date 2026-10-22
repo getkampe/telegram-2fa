@@ -23,6 +23,15 @@ can manage. A first response should arrive within a few days.
 the user has already authenticated, no per-message cost, no SIM-swap surface, and
 no carrier in the path.
 
+**It does not give you end-to-end encryption.** A bot chat is a *cloud chat*:
+encrypted client-to-server and between Telegram's own data centres, but readable
+by Telegram, and backed up to their infrastructure. End-to-end encryption in
+Telegram exists only in Secret Chats, which bots cannot use. So the codes this
+library sends are visible to Telegram and to anyone who compromises the user's
+Telegram account — which is a weaker guarantee than an authenticator app, where
+the secret never leaves the device. If your threat model includes the messaging
+provider, this is not the factor for you.
+
 **It does not give you** control of the recipient's Telegram account. If someone
 has the user's Telegram session, they have the codes. Telegram as a second factor
 is therefore a *possession* factor bound to a Telegram account — about as strong
@@ -91,10 +100,16 @@ body to a log — and the update body is the important one, because for this bot
 the update body *is* the code. Logging the whole payload at `info` is the single
 most common way a Telegram 2FA implementation leaks every code it has ever sent.
 
-Set a pepper (`TELEGRAM_2FA_HASH_PEPPER`). Without one, a dumped store of
-six-digit hashes is trivially reversed: there are only a million candidates, so
-the table takes seconds to build. With one, the dump is useless without the
-application secret.
+**The key is the part that matters, not the hash.** A six-digit code has a
+million possible values, so an *unkeyed* digest of one is reversed by a table
+anyone can build in seconds — hashing without a key protects nothing from
+whoever reads the store, while looking as though it does. `TELEGRAM_2FA_HASH_PEPPER`
+is therefore required: both packages refuse to start without at least 32
+characters of it, and it belongs outside the store it protects.
+
+Digests are also bound to the `user_id`, so one lifted from a dump cannot be
+matched against another account's record, and an attacker needs a fresh
+million-candidate search per account rather than one table for all of them.
 
 ### T4 — Replaying a code
 
@@ -183,7 +198,56 @@ Whoever holds the phone can already read the codes; letting them also remove the
 factor, with no session and no password, turns a stolen phone into a permanently
 single-factor account.
 
-### T8 — The bot as an amplifier
+### T8 — Racing the single-use rule
+
+**The attack.** Submit the same code twice at the same moment. A verification
+built from read-check-delete has a gap between the check and the delete, and
+both requests pass through it: both read the live record, both match, both
+return success. One code, two authorised actions — two withdrawals from one
+approval, if the application treats verification as the gate.
+
+The same gap makes the attempt budget unenforceable. Incrementing a counter by
+reading it and writing it back loses updates under concurrency, so an attacker
+who fires guesses in parallel gets far more than five.
+
+**The mitigation.** The store contract requires two atomic primitives, and the
+library is built on them: `take` (atomic get-and-delete) and `add` (atomic
+set-if-absent). Verification *takes* the record, so exactly one caller holds it
+— that caller either consumes the code or writes it back with one more attempt
+spent, and a concurrent caller finds nothing. Cooldowns, link-token consumption
+and the webhook's idempotency marker use the same primitives.
+
+Choosing Redis does not by itself fix this; a get-check-delete sequence against
+Redis races exactly as happily. On Laravel, use the `redis` or `memcached` cache
+store: `database`, `file` and `array` do not give `pull()` an atomic primitive
+to stand on. The Node Redis store refuses to construct against a client with
+neither `GETDEL` nor `EVAL`, rather than silently racing.
+
+### T9 — Authority that outlives the factor it was granted over
+
+**The attack.** Start a chat replacement, proving possession of the current
+Telegram account, and keep the resulting link token. Then wait: the user loses
+their Telegram account and recovers through support, linking a fresh chat. Now
+present the old token. If it only records "this user may replace their chat", it
+is honoured, and the attacker's chat becomes the second factor for an account
+they never had access to.
+
+**The mitigation.** A replacement token identifies the *binding* whose
+possession was proved, by a keyed digest of the chat id and its verification
+time. Any unlink, relink or replacement changes that, and resolution rejects a
+token whose binding is no longer current.
+
+The related failure is quieter: a replacement that is refused must not cost the
+user the factor they already had. Releasing the old binding before checking the
+destination meant a request that failed still stripped the account of its second
+factor. The move is now a single write that either takes the new binding or
+leaves the old one untouched, and the old chat is not told it has been unlinked
+until the move has succeeded.
+
+Codes already in flight are dropped when a binding moves, since a code delivered
+to the old chat is proof in the hands of whoever still holds that chat.
+
+### T10 — The bot as an amplifier
 
 **The attack.** Your bot token can message anyone who has started the bot. An
 unthrottled challenge endpoint makes your application a way to send someone
@@ -193,7 +257,7 @@ unlimited Telegram messages.
 enforced in the library rather than left to the caller. Update deduplication also
 closes the retry path: without it, Telegram's own retries mint extra codes.
 
-### T9 — Codes handed to the bot by a confused user
+### T11 — Codes handed to the bot by a confused user
 
 **The attack.** A user pastes a code into the bot chat instead of the website. On
 an implementation that parses free text as a code, the bot has now received the
@@ -209,7 +273,12 @@ bot added to a group never issues a code in front of its members.
 
 - [ ] `TELEGRAM_WEBHOOK_SECRET` set, 32+ characters, and the webhook registered
       with it (`php artisan telegram:webhook`, or `setWebhook` directly).
-- [ ] `TELEGRAM_2FA_HASH_PEPPER` set to a long random string.
+- [ ] `TELEGRAM_2FA_HASH_PEPPER` set to a long random string, held somewhere
+      other than the store it protects. Both packages refuse to start without it.
+- [ ] The cache store gives the library real atomic primitives. Laravel: `redis`
+      or `memcached`, not `database`, `file` or `array`. Node: a Redis client
+      with `GETDEL` or `EVAL`. See T8 — this is a correctness requirement, not a
+      performance preference.
 - [ ] The bot token is in the environment, not in a committed config file. Rotate
       it through @BotFather if it has ever been committed.
 - [ ] The cache store is shared across processes and survives a deploy — Redis,

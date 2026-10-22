@@ -43,6 +43,11 @@ unlimited attempt budget, a code lifetime measured in days.
 `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_2FA_HASH_PEPPER` and the optional
 `TELEGRAM_2FA_CODE_TTL`, `_COOLDOWN`, `_MAX_ATTEMPTS`, `_APP_NAME`.
 
+`TELEGRAM_2FA_HASH_PEPPER` is required and must be at least 32 characters: it is
+the HMAC key for code hashes, and a six-digit code has only a million possible
+values, so an unkeyed digest of one is reversed by a table anyone can build in
+seconds.
+
 ### The identity store
 
 Four methods over your own users table. In Prisma:
@@ -223,7 +228,7 @@ to show a user.
 | `TelegramTwoFactor` | The protocol. |
 | `Config` | Validated configuration, plus `fromEnv`. |
 | `MemoryCodeStore`, `MemoryIdentityStore` | In-process, for tests. |
-| `RedisCodeStore` | Works with node-redis and ioredis (`dialect` option). |
+| `RedisCodeStore` | Works with node-redis and ioredis (`dialect` option). Requires `GETDEL` or `EVAL`. |
 | `FetchTelegramClient` | Telegram over global `fetch`. |
 | `DefaultMessages`, `escapeHtml` | Bot copy, and the escaper to use if you write your own. |
 | `WebhookVerifier`, `SECRET_HEADER`, `TELEGRAM_RANGES` | Webhook authentication. |
@@ -263,10 +268,27 @@ fake captured — which is also a neat proof that it is not leaking anywhere els
 
 ---
 
+### Why `CodeStore` has five methods
+
+`take` and `add` are not a convenience. Single use and the attempt budget are
+read-modify-write sequences, so built from get-check-delete they race: two
+verifications arriving together both read the live record, both match, and both
+succeed, while the attempt counter loses increments to the same lost update.
+
+`take` is an atomic get-and-delete (Redis `GETDEL`, or `EVAL` on older servers);
+`add` is an atomic set-if-absent that reports whether it stored, which makes the
+cooldown and the webhook claim a reservation exactly one caller can win.
+
+`RedisCodeStore` resolves its atomic primitive at construction and throws if the
+client offers neither, rather than silently racing under load.
+
 ## Requirements
 
 Node 18 or newer, for `fetch` and `AbortSignal.timeout`. Pass `fetchImpl` to
 `FetchTelegramClient` to supply your own.
+
+A store with atomic get-and-delete and set-if-absent. Redis 6.2+ has `GETDEL`;
+older servers are handled through `EVAL`.
 
 ## Tests
 
@@ -275,4 +297,5 @@ npm install
 npm test
 ```
 
-65 tests written clause by clause against the specification.
+114 tests written clause by clause against the specification, including the
+cross-language fixtures in `/conformance` that the PHP package also reads.

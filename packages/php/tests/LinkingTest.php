@@ -66,11 +66,15 @@ final class LinkingTest extends TestCase
     {
         $request = $this->tfa->startDeepLink('user-1');
 
-        // The key is derived from the hash, so the raw token must not be a key.
+        // The key is derived from a keyed hash of the token, so the raw token
+        // must not be a key — a store dump would otherwise hand over live link
+        // tokens directly.
         $this->assertNull($this->store->get($this->config->key('link', $request->token)));
-        $this->assertNotNull($this->store->get(
-            $this->config->key('link', hash_hmac('sha256', $request->token, ''))
-        ));
+
+        // And the token still resolves, so it is the derivation that differs
+        // rather than the record being missing.
+        $this->assertSame(1, $this->store->count());
+        $this->assertTrue($this->tfa->completeDeepLink($request->token, '555000111')->ok);
     }
 
     public function test_the_paste_flow_links_the_account(): void

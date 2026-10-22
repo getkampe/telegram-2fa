@@ -53,6 +53,7 @@ export function makeConfig(overrides: Partial<ConfigInput> = {}): Config {
     webhookSecret: 's'.repeat(48),
     botUsername: 'kampe_test_bot',
     appName: 'Kampe',
+    hashPepper: 'p'.repeat(48),
     ...overrides,
   })
 }

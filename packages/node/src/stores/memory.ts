@@ -45,6 +45,27 @@ export class MemoryCodeStore implements CodeStore {
   async forget(key: string): Promise<void> {
     this.items.delete(key)
   }
+
+  /**
+   * Trivially atomic here: one event loop, one Map, and no await between the
+   * read and the delete for anything else to run in.
+   */
+  async take(key: string): Promise<unknown | null> {
+    const value = await this.get(key)
+    this.items.delete(key)
+
+    return value
+  }
+
+  async add(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+    if ((await this.get(key)) !== null) {
+      return false
+    }
+
+    await this.put(key, value, ttlSeconds)
+
+    return true
+  }
 }
 
 /**

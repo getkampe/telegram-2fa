@@ -17,6 +17,16 @@ export interface ConfigInput {
   dedupeUpdates?: boolean
   updateDedupeTtl?: number
   restrictWebhookIps?: boolean
+  /**
+   * Which purposes a code the user fetched with /code may satisfy.
+   *
+   * Null, the default, means any: an on-demand code is general-purpose because
+   * it cannot know what it is for and the user asked for it deliberately. Set
+   * an allowlist to narrow that - ['login'] keeps /code useful for signing in
+   * while forcing privileged steps to issue their own code, at the cost of
+   * needing a push path for unlinking.
+   */
+  onDemandSatisfies?: string[] | null
 }
 
 const defaults = {
@@ -33,6 +43,7 @@ const defaults = {
   dedupeUpdates: true,
   updateDedupeTtl: 3600,
   restrictWebhookIps: false,
+  onDemandSatisfies: null as string[] | null,
 }
 
 /**
@@ -61,6 +72,7 @@ export class Config {
   readonly dedupeUpdates: boolean
   readonly updateDedupeTtl: number
   readonly restrictWebhookIps: boolean
+  readonly onDemandSatisfies: string[] | null
 
   constructor(input: ConfigInput) {
     const c = { ...defaults, ...input }
@@ -81,11 +93,39 @@ export class Config {
     this.dedupeUpdates = c.dedupeUpdates
     this.updateDedupeTtl = c.updateDedupeTtl
     this.restrictWebhookIps = c.restrictWebhookIps
+    this.onDemandSatisfies = c.onDemandSatisfies ?? null
 
     this.validate()
   }
 
+  /**
+   * Reject anything that is not a whole, finite number.
+   *
+   * Every range check below is a comparison, and a comparison against NaN is
+   * false - so `NaN < 30` and `NaN > 600` are both false and a NaN sails
+   * through every bound. NaN arrives easily, from Number(undefined) or
+   * Number('5 minutes') in an environment-variable path. A fractional TTL is
+   * less dangerous but still wrong, since it reaches Redis as an EX argument.
+   */
+  private requireWholeNumber(name: string, value: number): void {
+    if (!Number.isInteger(value)) {
+      throw new ConfigurationError(
+        `${name} must be a whole, finite number; received ${String(value)}. ` +
+          'A NaN here would pass every range check below it, because comparing ' +
+          'anything with NaN is false.',
+      )
+    }
+  }
+
   private validate(): void {
+    this.requireWholeNumber('codeLength', this.codeLength)
+    this.requireWholeNumber('codeTtl', this.codeTtl)
+    this.requireWholeNumber('cooldown', this.cooldown)
+    this.requireWholeNumber('maxAttempts', this.maxAttempts)
+    this.requireWholeNumber('linkCodeLength', this.linkCodeLength)
+    this.requireWholeNumber('linkTtl', this.linkTtl)
+    this.requireWholeNumber('updateDedupeTtl', this.updateDedupeTtl)
+
     if (this.botToken.trim() === '') {
       throw new ConfigurationError(
         'A bot token is required. Create a bot with @BotFather and set TELEGRAM_BOT_TOKEN.',
@@ -154,6 +194,35 @@ export class Config {
 
     if (this.keyPrefix === '' || this.keyPrefix.includes(':')) {
       throw new ConfigurationError('keyPrefix must be non-empty and must not contain a colon.')
+    }
+
+    // Required, not recommended. A six-digit code has a million possible
+    // values, so an unkeyed digest of one is reversed by a table anyone can
+    // build in seconds: without a key, hashing the codes protects nothing
+    // against someone who reads the store.
+    if (this.hashPepper.length < 32) {
+      throw new ConfigurationError(
+        'hashPepper must be at least 32 characters. It is the HMAC key for code hashes, ' +
+          'and without it a dumped cache of six-digit code hashes is reversed by a lookup ' +
+          'table of a million entries. Generate one with ' +
+          'new CodeGenerator().webhookSecret() and set TELEGRAM_2FA_HASH_PEPPER. ' +
+          'Keep it outside the store it protects.',
+      )
+    }
+
+    if (this.onDemandSatisfies !== null) {
+      if (this.onDemandSatisfies.length === 0) {
+        throw new ConfigurationError(
+          'onDemandSatisfies must list at least one purpose, or be null for any. An empty ' +
+            'list makes every code fetched with /code useless.',
+        )
+      }
+
+      for (const purpose of this.onDemandSatisfies) {
+        if (typeof purpose !== 'string' || purpose === '') {
+          throw new ConfigurationError('onDemandSatisfies must contain non-empty strings.')
+        }
+      }
     }
   }
 

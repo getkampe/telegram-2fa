@@ -124,4 +124,54 @@ final class PurposeTest extends TestCase
 
         $this->assertTrue($this->tfa->unlink('user-1', $this->lastCode())->ok);
     }
+
+    /**
+     * The general-purpose on-demand code is a policy, not a law.
+     *
+     * Asking the bot for a code proves the user wanted a code; it does not
+     * prove they meant to remove their second factor. An installation that
+     * wants privileged steps to issue their own challenge can narrow which
+     * purposes an on-demand code is accepted for.
+     */
+    public function test_the_on_demand_exemption_can_be_narrowed(): void
+    {
+        $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
+        $this->identities->link('user-1', '555000111');
+
+        $tfa->pull('555000111');
+        $code = $this->lastCode();
+
+        // Still fine for signing in.
+        $this->assertTrue($tfa->verify('user-1', $code, 'login')->ok);
+
+        $this->clock->advance(121);
+        $tfa->pull('555000111');
+
+        // But no longer a way to approve a payout or strip the factor.
+        $this->assertFalse($tfa->verify('user-1', $this->lastCode(), 'withdrawal')->ok);
+    }
+
+    public function test_narrowing_the_exemption_still_allows_a_purpose_specific_code(): void
+    {
+        $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
+        $this->identities->link('user-1', '555000111');
+
+        $tfa->push('user-1', 'withdrawal');
+
+        $this->assertTrue($tfa->verify('user-1', $this->lastCode(), 'withdrawal')->ok);
+    }
+
+    public function test_narrowing_the_exemption_blocks_on_demand_unlinking(): void
+    {
+        $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
+        $this->identities->link('user-1', '555000111');
+
+        $tfa->pull('555000111');
+
+        // Worth knowing before you set this: the bot's /unlink instructions
+        // tell the user to send /code, so an installation that narrows the
+        // exemption needs its own push path for unlinking.
+        $this->assertFalse($tfa->unlink('user-1', $this->lastCode())->ok);
+        $this->assertTrue($tfa->isLinked('user-1'));
+    }
 }

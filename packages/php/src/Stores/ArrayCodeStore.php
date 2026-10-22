@@ -58,6 +58,30 @@ final class ArrayCodeStore implements CodeStore
     }
 
     /**
+     * Trivially atomic here: one process, one array, no interleaving point
+     * between the read and the unset.
+     */
+    public function take(string $key): mixed
+    {
+        $value = $this->get($key);
+
+        unset($this->items[$key]);
+
+        return $value;
+    }
+
+    public function add(string $key, mixed $value, int $ttlSeconds): bool
+    {
+        if ($this->get($key) !== null) {
+            return false;
+        }
+
+        $this->put($key, $value, $ttlSeconds);
+
+        return true;
+    }
+
+    /**
      * Test helper: how many live keys the store holds.
      */
     public function count(): int

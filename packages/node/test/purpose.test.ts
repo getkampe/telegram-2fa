@@ -127,6 +127,78 @@ describe('purpose binding', () => {
     assert.equal(result.ok, false)
   })
 
+  /**
+   * The general-purpose on-demand code is a policy, not a law.
+   *
+   * Asking the bot for a code proves the user wanted a code; it does not prove
+   * they meant to remove their second factor. An installation that wants
+   * privileged steps to issue their own challenge can narrow which purposes an
+   * on-demand code is accepted for.
+   */
+  it('can narrow which purposes an on-demand code satisfies', async () => {
+    const h = harness({ onDemandSatisfies: ['login'] })
+    await h.link()
+
+    await h.tfa.pull('555000111')
+
+    // Still fine for signing in.
+    assert.equal((await h.tfa.verify('user-1', h.lastCode(), PURPOSE_LOGIN)).ok, true)
+
+    h.clock.advance(121)
+    await h.tfa.pull('555000111')
+
+    // But no longer a way to approve a payout.
+    assert.equal((await h.tfa.verify('user-1', h.lastCode(), 'withdrawal')).ok, false)
+  })
+
+  it('still accepts a purpose-specific code when the exemption is narrowed', async () => {
+    const h = harness({ onDemandSatisfies: ['login'] })
+    await h.link()
+
+    await h.tfa.push('user-1', 'withdrawal')
+
+    assert.equal((await h.tfa.verify('user-1', h.lastCode(), 'withdrawal')).ok, true)
+  })
+
+  it('blocks on-demand unlinking when the exemption is narrowed', async () => {
+    const h = harness({ onDemandSatisfies: ['login'] })
+    await h.link()
+
+    await h.tfa.pull('555000111')
+
+    // Worth knowing before setting this: the bot's /unlink instructions tell
+    // the user to send /code, so an installation that narrows the exemption
+    // needs its own push path for unlinking.
+    assert.equal((await h.tfa.unlink('user-1', h.lastCode())).ok, false)
+    assert.equal(await h.tfa.isLinked('user-1'), true)
+  })
+
+  /**
+   * Digests are bound to the account, so one lifted from the store cannot be
+   * matched against another user's code, and an attacker who dumps the store
+   * needs a fresh search per account rather than one table for all of them.
+   */
+  it('binds a code record to its account', async () => {
+    const h = harness()
+    await h.link('user-1', '555000111')
+    await h.link('user-2', '777000222')
+
+    await h.tfa.push('user-1')
+    const code = h.lastCode()
+    const record = await h.store.get(h.config.key('code', 'user-1'))
+
+    // Transplant user-1's record onto user-2, as a store-level attacker with a
+    // known code would.
+    await h.store.put(h.config.key('code', 'user-2'), record, 300)
+
+    assert.equal(
+      (await h.tfa.verify('user-2', code)).ok,
+      false,
+      'a digest must not verify against a different account',
+    )
+    assert.equal((await h.tfa.verify('user-1', code)).ok, true)
+  })
+
   it('still budgets attempts when the purpose is right but the code is wrong', async () => {
     const h = harness()
     await h.link()

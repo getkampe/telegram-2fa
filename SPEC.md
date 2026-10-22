@@ -126,6 +126,30 @@ The `replace` mark is what authorises the rebinding, and it **MUST** be carried
 by the stored token rather than supplied at resolution time — otherwise the step
 that proves possession can be skipped by presenting an ordinary token.
 
+**Replacement is destination-safe.** The existing binding **MUST NOT** be
+released before the new one is known to be available. An implementation that
+unlinks the old chat and then discovers the destination belongs to another
+account has destroyed the user's second factor as a side effect of a request
+that failed — leaving the account either locked out or protected by one factor,
+neither of which the user asked for. The move **MUST** therefore be a single
+write that either takes the new binding or leaves the old one untouched, and the
+old chat **MUST NOT** be told it has been unlinked until the move has succeeded.
+
+**Replacement authority does not survive its factor.** The token **MUST**
+identify the binding whose possession was proved — a counter, a version column,
+or a keyed digest of the chat id and its verification time — and resolution
+**MUST** reject a token whose identified binding is no longer current. Storing
+only the `user_id` and the `replace` mark is not enough: a token minted before an
+account recovery would still be honoured after it, so whoever held that token
+could move the factor to a chat of their choosing the moment the user finished
+recovering.
+
+**Replacement invalidates codes in flight.** Any challenge outstanding for the
+account **MUST** be dropped when the binding moves, along with the cooldown. A
+code already delivered to the old chat is proof in the hands of whoever still
+holds that chat; dropping the cooldown is a convenience, so that the user can be
+challenged on the new chat immediately.
+
 A user who has lost access to the old chat entirely cannot complete step 1 and
 **MUST** go through the recovery path of section 8 instead.
 
@@ -194,6 +218,34 @@ asked for it deliberately: nothing the App did caused it to exist.
    a code that survives verification can be replayed from a logged request body.
 7. On mismatch: increment `attempts`, keep the original TTL, return `invalid`.
 
+### 5.1 Atomicity
+
+Steps 1 to 7 are a read, a decision and a write. Performed as separate store
+operations they are a time-of-check-to-time-of-use race, and the consequences
+are not subtle: two verifications arriving together both read the live record,
+both match it, and both return `ok`, so a single-use code is used twice. The
+attempt counter loses increments to the same lost-update race, which makes the
+budget of section 5 unenforceable by simply racing it.
+
+Therefore:
+
+1. Reading the record and removing it **MUST** be one atomic operation —
+   Redis `GETDEL` or `EVAL`, `DELETE ... RETURNING`, or a row locked inside a
+   transaction. The caller that obtains the record holds the only copy: it
+   either consumes the code or writes it back with one more attempt spent.
+2. Arming the cooldown **MUST** be an atomic reservation rather than a read
+   followed by a write — `SET NX EX`, or an `add` that reports whether it
+   stored. Otherwise two challenges arriving together both find no cooldown and
+   both send.
+3. Consuming a link token (sections 3.1, 3.2) **MUST** be atomic for the same
+   reason: two `/start` messages carrying one token would otherwise both
+   resolve it.
+4. The webhook's idempotency marker (section 7.6) **MUST** be an atomic claim.
+
+A store exposing only get, put and delete is **NOT** sufficient, and an
+implementation **MUST NOT** present one as though it were. Using Redis does not
+by itself make a get-check-delete sequence atomic.
+
 The purpose check **MUST NOT** be skippable by omitting the argument. An
 implementation whose default is "compare against nothing" provides no binding at
 all unless every call site opts in, and the call site that forgets is both
@@ -218,13 +270,26 @@ grinding; with 5 attempts per code it is 1 chance in 200 000 per challenge.
 | Source of randomness | Cryptographically secure (`random_int`, `crypto.randomInt`, `crypto/rand`). **MUST NOT** be `rand`, `mt_rand`, `Math.random`. |
 | 2FA code format | 6 to 8 characters. Numeric is permitted here because the Store key is `code:<user_id>` — the code is scoped to one account, so the search space is not shared. |
 | Link code format | 8 characters or more from an alphabet of 32 symbols or more (section 3.2). |
-| Storage | The **hash** of the code (SHA-256 or stronger). The plaintext **MUST NOT** be written to the Store, to a log, to an audit trail or to an error response. |
+| Storage | A **keyed** hash of the code (HMAC-SHA-256 or stronger). The plaintext **MUST NOT** be written to the Store, to a log, to an audit trail or to an error response. |
+| Hash key | **REQUIRED**, 32 bytes or more, held outside the Store it protects. |
+| Hash binding | The authenticated input **MUST** include the `user_id`, so a digest is not interchangeable between accounts. |
 | TTL | 2FA code 600 s or less. Default 300 s. |
 | Cooldown | 60 s or more between sends for one `user_id`. Default 120 s. |
 
 Codes are low-entropy, short-lived and single-use, so a fast hash is correct here;
-a password-grade KDF would only add latency. The hash exists to keep a Store or log
-dump from yielding live codes, not to resist offline cracking.
+a password-grade KDF would only add latency.
+
+What does the work is the key, not the hash. A six-digit code has a million
+possible values, so an **unkeyed** digest of one is reversed by a table anyone
+can build in seconds — an implementation that hashes codes without a key, or
+with an empty default key, protects nothing at all from whoever reads the Store,
+while appearing to. That is why the key is required rather than recommended, and
+why it **MUST NOT** live in the Store it protects.
+
+Binding the digest to the `user_id` means a digest lifted from one account's
+record cannot be matched against another's, and an attacker who dumps the Store
+needs a fresh million-candidate search per account rather than one table for all
+of them.
 
 ---
 
@@ -256,9 +321,27 @@ the protocol.
 5. **Always 200.** The webhook **SHOULD** answer `200` for any update it has
    accepted but cannot handle. Telegram retries non-2xx responses with backoff and
    will queue updates behind a failing one.
-6. **Idempotency.** `update_id` is unique per update and increases. An
-   implementation **SHOULD** drop an `update_id` it has already processed; retries
-   after a timeout are normal.
+6. **Idempotency, as a claim rather than a marker.** `update_id` is unique per
+   update and increases. An implementation **SHOULD** drop an `update_id` it has
+   already processed; retries after a timeout are normal, and Telegram may
+   deliver concurrently.
+
+   The marker **MUST** be written as an atomic claim (section 5.1), not a read
+   followed by a write, or two simultaneous deliveries both find nothing and
+   both proceed.
+
+   The claim **MUST NOT** be settled as processed before the work has succeeded.
+   An implementation that marks an update done on arrival and then fails turns
+   one transient error into a permanently lost operation: the retry arrives,
+   sees the marker, and drops it. On failure the claim **MUST** be released, so
+   that the retry is processed. Giving the claim a short lifetime and extending
+   it on success achieves the same thing for a process that dies mid-handling.
+
+   An implementation **MAY** still answer `200` for an update whose handling
+   failed, and the reference implementations do: a non-2xx stalls the queue for
+   every user of the bot, while a lost `/code` inconveniences one user who can
+   ask again. That trade **SHOULD** be documented rather than silent, and does
+   not apply to an operation the user cannot simply repeat.
 
 ---
 
@@ -285,11 +368,21 @@ All keys are prefixed with a configurable namespace (default `tg2fa`).
 | Key | Value | TTL |
 | --- | --- | --- |
 | `<ns>:code:<user_id>` | `{ hash, expires_at, attempts, purpose }` | code TTL |
-| `<ns>:cooldown:<user_id>` | next-send unix timestamp | cooldown |
-| `<ns>:link:<hash(token)>` | `{ user_id }` (deeplink) or `{ chat_id }` (paste), plus `replace: true` for 3.3 | link TTL |
-| `<ns>:update:<update_id>` | `1` | retry window or longer |
+| `<ns>:cooldown:<user_id>` | next-send unix timestamp, a bare integer | cooldown |
+| `<ns>:link:<hash(token)>` | `{ user_id, expires_at }` (deeplink) or `{ chat_id, expires_at }` (paste), plus `replace` and `factor` for 3.3 | link TTL |
+| `<ns>:update:<update_id>` | an opaque marker | retry window or longer |
 
 `user_id` is an opaque string. Implementations **MUST NOT** assume it is an integer.
+
+**The field names above are normative, and they are `snake_case`.** They are the
+wire format: two implementations sharing one Store must agree on them, and an
+implementation that writes `expiresAt` where another reads `expires_at` has made
+the Store unshareable while every one of its own tests passes. The same applies
+to the shape — the cooldown is a bare integer, not an object wrapping one.
+
+Implementations **SHOULD** verify this against the fixtures in `/conformance`
+rather than against their own output, because an implementation that recomputes
+its own expected values agrees with itself whatever it does.
 
 ---
 
@@ -318,16 +411,24 @@ An implementation conforms to this specification when it:
 
 - enforces the uniqueness rules of section 2 at the storage layer;
 - implements the deeplink flow of section 3.1, and the replacement flow of 3.3
-  with the `replace` mark carried by the stored token;
+  with the `replace` mark carried by the stored token, destination-safe, with
+  authority pinned to the binding proved and codes in flight invalidated;
 - writes and reads one key for both challenge directions (section 4);
 - checks the purpose on every verification, with no way to skip it by omission,
   and treats `on_demand` as general-purpose (sections 4.2 and 5);
-- hashes codes, compares in constant time, and enforces single use and an attempt
-  budget (sections 5 and 6);
+- performs verification, cooldown reservation, link-token consumption and the
+  webhook claim atomically (section 5.1);
+- keys its code hashes with a required secret, binds them to the `user_id`,
+  compares in constant time, and enforces single use and an attempt budget
+  (sections 5 and 6);
 - rejects webhook requests without a valid secret token (section 7.1);
 - never writes a code or a raw update body to a log (sections 6 and 7.4);
+- releases its idempotency claim when handling fails (section 7.6);
 - requires proof of a factor before unlinking (section 8);
-- uses the key layout of section 9 and the error vocabulary of section 10.
+- uses the key layout, field names and value shapes of section 9, checked
+  against `/conformance`, and the error vocabulary of section 10;
+- rejects configuration values that are not whole, finite numbers, since a
+  comparison against NaN is false and a NaN therefore passes every bound.
 
 The test suites in `packages/*/test` are written against these clauses and are the
 executable form of this document.

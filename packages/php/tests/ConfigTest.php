@@ -102,6 +102,60 @@ final class ConfigTest extends TestCase
         $this->config(['hash_algorithm' => 'rot13']);
     }
 
+    /**
+     * A six-digit code has a million possible values, so an unkeyed digest of
+     * one is reversed by a table anyone can build in seconds. Hashing the codes
+     * without a key protects nothing from someone who reads the store, which is
+     * why this is required rather than recommended.
+     */
+    public function test_a_missing_hash_pepper_is_refused(): void
+    {
+        $this->expectException(ConfigurationError::class);
+        $this->expectExceptionMessageMatches('/hashPepper/');
+
+        $this->config(['hash_pepper' => '']);
+    }
+
+    public function test_a_short_hash_pepper_is_refused(): void
+    {
+        $this->expectException(ConfigurationError::class);
+
+        $this->config(['hash_pepper' => 'too-short']);
+    }
+
+    public function test_an_empty_on_demand_allowlist_is_refused(): void
+    {
+        $this->expectException(ConfigurationError::class);
+        $this->expectExceptionMessageMatches('/at least one purpose/');
+
+        $this->config(['on_demand_satisfies' => []]);
+    }
+
+    /**
+     * Digests are bound to the account, so one lifted from the store cannot be
+     * matched against another user's code, and an attacker who dumps the store
+     * needs a fresh search per account rather than one table for all of them.
+     */
+    public function test_a_code_record_is_bound_to_its_account(): void
+    {
+        $this->identities->link('user-1', '555000111');
+        $this->identities->link('user-2', '777000222');
+
+        $this->tfa->push('user-1');
+        $code = $this->lastCode();
+        $record = $this->store->get($this->config->key('code', 'user-1'));
+
+        // Transplant user-1's record onto user-2, as a store-level attacker
+        // with a known code would.
+        $this->store->put($this->config->key('code', 'user-2'), $record, 300);
+
+        $this->assertFalse(
+            $this->tfa->verify('user-2', $code)->ok,
+            'a digest must not verify against a different account'
+        );
+        $this->assertTrue($this->tfa->verify('user-1', $code)->ok);
+    }
+
     public function test_defaults_are_the_recommended_values(): void
     {
         $config = $this->config();

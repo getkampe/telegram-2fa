@@ -34,4 +34,25 @@ final class CacheCodeStore implements CodeStore
     {
         $this->cache->forget($key);
     }
+
+    /**
+     * Laravel's pull() is get-then-forget at the repository level, so it is only
+     * truly atomic on a driver whose own primitive is. On redis and memcached it
+     * is; on database, file and array it is not, and two simultaneous
+     * verifications of one code can both win.
+     *
+     * That is the main reason this package tells you to use redis or memcached
+     * rather than treating the choice as a performance detail.
+     */
+    public function take(string $key): mixed
+    {
+        return $this->cache->pull($key);
+    }
+
+    public function add(string $key, mixed $value, int $ttlSeconds): bool
+    {
+        // Repository::add is atomic on every driver Laravel ships: the ones
+        // without a native add are serialised behind a lock.
+        return $this->cache->add($key, $value, $ttlSeconds);
+    }
 }

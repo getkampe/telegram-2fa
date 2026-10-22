@@ -56,7 +56,25 @@ abstract class TestCase extends BaseTestCase
             'webhook_secret' => str_repeat('s', 48),
             'bot_username' => 'kampe_test_bot',
             'app_name' => 'Kampe',
+            'hash_pepper' => str_repeat('p', 48),
         ], $overrides));
+    }
+
+    /**
+     * A service wired to the same parts but a different configuration.
+     *
+     * @param  array<string, mixed>  $overrides
+     */
+    protected function withConfig(array $overrides): TelegramTwoFactor
+    {
+        return new TelegramTwoFactor(
+            $this->config($overrides),
+            $this->store,
+            $this->identities,
+            $this->telegram,
+            new DefaultMessages(),
+            $this->clock,
+        );
     }
 
     /**

@@ -1,0 +1,71 @@
+{
+  "$comment": [
+    "Cross-language conformance fixtures for SPEC.md section 9.",
+    "",
+    "Both the PHP and the Node test suites read this file, write these records",
+    "into a store under these exact keys, and verify these codes through their",
+    "own public API. A field name or hash construction that drifts in one",
+    "implementation fails the other's suite, which is the only way the claim",
+    "that the two interoperate can be checked rather than asserted.",
+    "",
+    "The digests were produced by HMAC-SHA256 over context + NUL + code, keyed",
+    "with the pepper below. They are committed as literals on purpose: if both",
+    "implementations recomputed them, a shared mistake would agree with itself."
+  ],
+  "schema_version": 1,
+  "config": {
+    "key_prefix": "tg2fa",
+    "hash_algorithm": "sha256",
+    "hash_pepper": "conformance-fixture-pepper-0123456789abcd"
+  },
+  "code_record": {
+    "$comment": "A live challenge for user-1, issued for a withdrawal.",
+    "key": "tg2fa:code:user-1",
+    "user_id": "user-1",
+    "plaintext_code": "314159",
+    "value": {
+      "hash": "913e4f3f255024e44b6025ee81a94351e3cad1a859f497826ef68787e07dd679",
+      "expires_at": 1800000300,
+      "attempts": 0,
+      "purpose": "withdrawal"
+    }
+  },
+  "on_demand_record": {
+    "$comment": "A code the user fetched with /code: general-purpose by default.",
+    "key": "tg2fa:code:user-2",
+    "user_id": "user-2",
+    "plaintext_code": "271828",
+    "value": {
+      "hash": "fd52ea08fe1a9c7af612e825ac7d6c7bd70331e591c4defe4fe1e9f4d13548a6",
+      "expires_at": 1800000300,
+      "attempts": 0,
+      "purpose": "on_demand"
+    }
+  },
+  "deeplink_record": {
+    "$comment": "A pending deeplink for user-3. The key is a keyed hash of the token.",
+    "token": "conformance-deeplink-token-abcdefgh",
+    "key": "tg2fa:link:ca414fe6571796cd87d16fece40063e5f27b1ec5efecdd4781d253da88bcae57",
+    "user_id": "user-3",
+    "value": {
+      "user_id": "user-3",
+      "expires_at": 1800000600
+    }
+  },
+  "paste_record": {
+    "$comment": "A pending paste-flow code bound to a chat.",
+    "token": "K3M9QW7P",
+    "key": "tg2fa:link:b0decb92641fe39d8faa9528998fa79906f9faa5b5c8bb3bd539edfe076caa6e",
+    "chat_id": "555000111",
+    "value": {
+      "chat_id": "555000111",
+      "expires_at": 1800000600
+    }
+  },
+  "cooldown_record": {
+    "$comment": "A plain integer, not an object: the next permitted send time.",
+    "key": "tg2fa:cooldown:user-1",
+    "value": 1800000120
+  },
+  "now": 1800000000
+}

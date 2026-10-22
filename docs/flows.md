@@ -104,8 +104,15 @@ Two properties worth preserving if you reimplement this:
 - **The `replace` mark lives on the stored token**, not on the call that resolves
   it. Taking it from the resolution side makes the proof step skippable by
   presenting an ordinary token.
-- **The old chat stays linked until the new one is resolved.** Authorising a
-  replacement the user never finishes must not leave the account factorless.
+- **The old chat stays linked until the new one is resolved**, and is only
+  released by the same write that takes the new binding. Authorising a
+  replacement the user never finishes must not leave the account factorless, and
+  neither must one that is refused because the destination is taken.
+- **The token is pinned to the binding it proved.** Once that binding changes —
+  through recovery, unlinking, or another replacement — the token is void, so
+  authority cannot outlive the factor it was granted over.
+- **Codes in flight are dropped when the binding moves**, since a code delivered
+  to the old chat is proof held by whoever still has that chat.
 
 A user who has lost the old chat entirely cannot complete step one, and belongs
 in the recovery path below.
@@ -122,8 +129,8 @@ push(userId, purpose)
   ├─ identities.findByUserId(userId)
   │    └─ absent or linkedAt null  →  not_linked
   │
-  ├─ get cooldown:<userId>
-  │    └─ in the future            →  cooldown, with next_send_at
+  ├─ ADD cooldown:<userId>         ← atomic reservation; losing it means
+  │    └─ already held             →  cooldown, with next_send_at
   │
   ├─ code = 6 digits (CSPRNG)
   ├─ put code:<userId> = {hash, expires_at, attempts: 0, purpose}, 300s
@@ -168,7 +175,7 @@ fails ([SPEC.md section 4](../SPEC.md#4-challenge)).
 ```
 verify(userId, code, purpose = 'login')
   │
-  ├─ get code:<userId>
+  ├─ TAKE code:<userId>                 ← atomic get-and-delete, not get
   │    └─ absent                        →  expired
   ├─ attempts >= 5                      →  too_many_attempts, forget key
   ├─ now > expires_at                   →  expired, forget key
@@ -180,9 +187,16 @@ verify(userId, code, purpose = 'login')
   │    └─ yes  →  forget key, ok
 ```
 
-Three properties to preserve in any reimplementation: single use on success, the
-attempt budget destroying the code, and the re-store **not** extending the code's
-lifetime.
+Four properties to preserve in any reimplementation: the **atomic take**, single
+use on success, the attempt budget destroying the code, and the re-store **not**
+extending the code's lifetime.
+
+The take is the one that is easy to get wrong and hard to notice. Reading the
+record, deciding, and deleting it afterwards leaves a window in which a second
+request reads the same live record — so one code verifies twice, and the attempt
+counter loses increments to the same lost update. Taking the record means the
+winner holds the only copy and a concurrent caller finds nothing. See
+[SPEC.md 5.1](../SPEC.md#51-atomicity).
 
 ### Purpose
 
@@ -242,8 +256,8 @@ is how the user finds out.
 | Key | Written by | Read by | Cleared by |
 | --- | --- | --- | --- |
 | `link:<h(token)>` | `startDeepLink`, `startPasteLink`, `startChatReplacement` | the matching complete | first resolution, or TTL |
-| `code:<userId>` | `push`, `pull` | `verify` | success, budget spent, expiry, unlink |
-| `cooldown:<userId>` | `push`, `pull` | `push`, `pull` | TTL, delivery failure, unlink |
+| `code:<userId>` | `push`, `pull` | `verify` (takes it) | any verification, budget spent, expiry, unlink, replacement |
+| `cooldown:<userId>` | `push`, `pull` (reserve) | the reservation itself | TTL, delivery failure, unlink, replacement |
 | `update:<updateId>` | the update handler | the update handler | TTL |
 | chat id + linkedAt | `link` | everything | `unlink` |
 

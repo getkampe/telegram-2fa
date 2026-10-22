@@ -34,10 +34,18 @@ whole class of deployment mistake, and costs ten lines.
 
 ```
 CodeStore       get(key) / put(key, value, ttl) / forget(key)
+                take(key)            -> atomic get-and-delete
+                add(key, value, ttl) -> atomic set-if-absent, reports success
 IdentityStore   find_by_user_id / find_by_chat_id / link / unlink
 TelegramClient  send_message / answer_callback_query / get_me / set_webhook
 Clock           now() -> unix seconds
 ```
+
+`take` and `add` are the load-bearing ones. Do not reduce `CodeStore` to the
+first three and build the rest on top of them: single use and the attempt budget
+are read-modify-write sequences, and get-check-delete loses both to a race
+(SPEC.md 5.1). Redis has `GETDEL` and `SET NX EX`; a SQL store has
+`DELETE ... RETURNING` and a unique insert.
 
 Keep them this small. Everything else — framework integration, ORMs, HTTP
 clients — lives in adapters outside the core, which is what makes the core
@@ -54,7 +62,10 @@ Never the language's default `random` — it is seeded and predictable from prio
 output, which for a 2FA code means an attacker who has seen a few can produce the
 next.
 
-Hash with HMAC-SHA256 and a pepper. Compare with a constant-time function:
+Hash with HMAC-SHA256 over `user_id` + NUL + `code`, keyed with a **required**
+pepper of at least 32 bytes. Both halves matter: without the key, a six-digit
+digest is reversed by a million-entry table; without the `user_id`, a digest
+works against any account. Compare with a constant-time function:
 `hmac.compare_digest`, `subtle.ConstantTimeCompare`, `Rack::Utils.secure_compare`.
 Never `==`.
 
@@ -73,7 +84,7 @@ Verification is ten lines and is the most important ten lines in the port
 
 ---
 
-## The eight places a port goes wrong
+## The twelve places a port goes wrong
 
 These all produce an implementation that passes a manual test.
 
@@ -116,6 +127,32 @@ everything (SPEC.md 4.2), or `/code` becomes useless for confirming an unlink.
 resolving call. A port that accepts `complete_deep_link(token, chat_id, replace:
 true)` has made the proof step optional, which is the entire point of the flow.
 
+**9. Building verification from get, check, delete.** The commonest and worst of
+these. Two verifications arriving together both read the live record, both match
+and both succeed; the attempt counter loses increments the same way. Take the
+record atomically and write it back only to spend an attempt (SPEC.md 5.1). Note
+that choosing Redis does not fix it — a get-check-delete sequence against Redis
+races exactly as happily.
+
+**10. Releasing the old binding before the new one is secured.** A replacement
+onto a chat that turns out to belong to someone else must not leave the first
+account with no factor at all. Make the move one write that either takes the new
+binding or leaves the old one alone, and do not tell the old chat it has been
+unlinked until the write succeeds.
+
+**11. A replacement token that records only the user.** It must identify the
+binding whose possession was proved, or a token minted before an account
+recovery is still honoured after it — handing whoever holds it the chat the user
+just recovered onto. A counter, a version column or a keyed digest of
+`chat_id|linked_at` all work.
+
+**12. Trusting your own field names.** Write `snake_case` exactly as SPEC.md
+section 9 lists it, and check against `/conformance` rather than against your own
+output. The two reference implementations shipped with `expiresAt` and
+`expires_at` respectively, each agreed with itself, and neither could have read
+the other's records — in a repository whose README claimed they could share a
+store.
+
 ---
 
 ## Testing a port
@@ -135,7 +172,15 @@ The ones that catch real bugs:
 - a numerically-equal-but-textually-different code fails (catches `==` on digit
   strings in loosely typed languages)
 - a prefix and an extension of the webhook secret are both rejected
-- a repeated `update_id` is dropped
+- a repeated `update_id` is dropped, and the claim is released when handling
+  fails so that a retry is still processed
+- one code cannot verify twice when a second verification runs inside the
+  first one's window
+- a refused replacement leaves the original binding in place
+- a replacement token is void after recovery, unlinking or another replacement
+- the records in `/conformance` verify through your public API, and the records
+  you write match them field for field
+- a configuration value of NaN is rejected rather than passing every bound
 - one chat cannot become the factor for a second account
 - a group chat gets no code
 

@@ -172,7 +172,7 @@ show a user.
 
 | Interface | Methods | Bundled implementations |
 | --- | --- | --- |
-| `CodeStore` | `get`, `put`, `forget` | `Stores\ArrayCodeStore`, `Laravel\CacheCodeStore` |
+| `CodeStore` | `get`, `put`, `forget`, `take`, `add` | `Stores\ArrayCodeStore`, `Laravel\CacheCodeStore` |
 | `IdentityStore` | `findByUserId`, `findByChatId`, `link`, `unlink` | `Stores\ArrayIdentityStore`, `Laravel\EloquentIdentityStore` |
 | `TelegramClient` | `sendMessage`, `answerCallbackQuery`, `getMe`, `setWebhook`, `deleteWebhook` | `Telegram\HttpTelegramClient` (curl) |
 | `Messages` | 10 string methods | `Telegram\DefaultMessages` (English) |
@@ -197,16 +197,37 @@ Defaults are the recommended values; the bounds are enforced.
 | `link_code_length` | 8 | ≥ 8 |
 | `link_ttl` | 600 | 60–900 |
 | `webhook_secret` | — | 32–256 chars of `A-Za-z0-9_-`, required |
-| `hash_pepper` | `''` | any; strongly recommended |
+| `hash_pepper` | — | 32+ chars, **required** |
+| `on_demand_satisfies` | `null` (any) | list of purposes, or null |
 | `dedupe_updates` | `true` | — |
 | `restrict_webhook_ips` | `false` | — |
 
 ---
 
+### Why `take` and `add`
+
+`CodeStore` asks for two atomic operations beyond the obvious three, and they
+are not a convenience. Single use and the attempt budget are read-modify-write
+sequences, so built from get-check-delete they race: two verifications arriving
+together both read the live record, both match, and both succeed, while the
+attempt counter loses increments to the same lost update.
+
+`take` is an atomic get-and-delete — Redis `GETDEL`, Laravel `Cache::pull`,
+`DELETE ... RETURNING`. `add` is an atomic set-if-absent that reports whether it
+stored, which makes the cooldown and the webhook claim a reservation exactly one
+caller can win.
+
+On Laravel this means using the `redis` or `memcached` cache store. `pull()` is
+only as atomic as the driver underneath it, and `database`, `file` and `array`
+do not provide the primitive.
+
 ## Requirements
 
 PHP 8.1 or newer. `ext-curl` for the bundled Telegram client; implement
 `TelegramClient` yourself to avoid it.
+
+A cache store with atomic get-and-delete and set-if-absent: `redis` or
+`memcached`. See above for why this is a correctness requirement.
 
 ## Tests
 
@@ -215,4 +236,5 @@ composer install
 composer test
 ```
 
-73 tests written clause by clause against the specification.
+116 tests written clause by clause against the specification, including the
+cross-language fixtures in `/conformance` that the Node package also reads.

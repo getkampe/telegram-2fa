@@ -56,6 +56,13 @@ final class FakeTelegramClient implements TelegramClient
         return $last === false ? null : $last['text'];
     }
 
+    public function lastSentTo(): ?string
+    {
+        $last = end($this->sent);
+
+        return $last === false ? null : $last['chat_id'];
+    }
+
     public function messageCount(): int
     {
         return count($this->sent);

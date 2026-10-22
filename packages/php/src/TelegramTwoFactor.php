@@ -142,8 +142,11 @@ final class TelegramTwoFactor
      */
     public function completeDeepLink(string $token, string $chatId): LinkResult
     {
-        $key = $this->config->key('link', $this->hasher->hash($token));
-        $record = $this->store->get($key);
+        // Single use, and taken atomically: a token read now and deleted later
+        // can be resolved twice by two concurrent /start messages, and a token
+        // that survives a failed attempt can be retried by anyone who saw it —
+        // and it travelled through a chat, so others may have.
+        $record = $this->store->take($this->config->key('link', $this->hasher->hash($token)));
 
         if (! is_array($record) || ! isset($record['user_id'])) {
             $this->logger->warning('telegram-2fa: deeplink token not resolvable', ['chat_id' => $chatId]);
@@ -152,20 +155,59 @@ final class TelegramTwoFactor
         }
 
         if (($record['expires_at'] ?? 0) < $this->clock->now()) {
-            $this->store->forget($key);
+            return LinkResult::failed(ErrorCode::InvalidToken);
+        }
+
+        $replace = ($record['replace'] ?? false) === true;
+
+        // A replacement token carries authority over an existing factor, so it
+        // is only valid against the binding whose possession was proved. If
+        // that binding has since changed — recovered through support, unlinked,
+        // or already replaced — the proof no longer refers to anything and the
+        // token is void. Without this, a token minted before an account
+        // recovery still moves the factor afterwards, which hands whoever holds
+        // it the new chat as well.
+        if ($replace && ! $this->factorUnchanged((string) $record['user_id'], $record['factor'] ?? null)) {
+            $this->logger->warning('telegram-2fa: stale replacement token rejected', [
+                'user_id' => $record['user_id'],
+            ]);
 
             return LinkResult::failed(ErrorCode::InvalidToken);
         }
 
-        // Single use, and burned before the link is attempted rather than after:
-        // a token that survives a failed attempt can be retried by anyone who
-        // saw it, and a token that survives a successful one can be replayed.
-        $this->store->forget($key);
+        return $this->bind((string) $record['user_id'], $chatId, replace: $replace);
+    }
 
-        return $this->bind(
-            (string) $record['user_id'],
-            $chatId,
-            replace: ($record['replace'] ?? false) === true,
+    /**
+     * Whether the binding a replacement token was issued against still stands.
+     */
+    private function factorUnchanged(string $userId, mixed $fingerprint): bool
+    {
+        if (! is_string($fingerprint) || $fingerprint === '') {
+            return false;
+        }
+
+        $identity = $this->identities->findByUserId($userId);
+
+        if ($identity === null || ! $identity->isVerified()) {
+            return false;
+        }
+
+        return hash_equals($this->factorFingerprint($identity), $fingerprint);
+    }
+
+    /**
+     * Identifies one particular binding, so that authority over it cannot carry
+     * over to a later one.
+     *
+     * The chat and the moment it was verified are enough: any unlink, relink or
+     * replacement changes the verification timestamp, and therefore this value.
+     */
+    private function factorFingerprint(Identity $identity): string
+    {
+        return $this->hasher->hash(
+            $identity->chatId . '|' . (string) $identity->linkedAt,
+            'factor',
         );
     }
 
@@ -204,9 +246,17 @@ final class TelegramTwoFactor
         // The replace mark lives on the stored token, not on the call that
         // resolves it. Taking it from the resolution side would make the proof
         // above skippable by presenting an ordinary token.
+        //
+        // The fingerprint pins the authority to the binding just proved, so the
+        // token dies the moment that binding does.
         $this->store->put(
             $this->config->key('link', $this->hasher->hash($token)),
-            ['user_id' => $userId, 'expires_at' => $expiresAt, 'replace' => true],
+            [
+                'user_id' => $userId,
+                'expires_at' => $expiresAt,
+                'replace' => true,
+                'factor' => $this->factorFingerprint($identity),
+            ],
             $this->config->linkTtl,
         );
 
@@ -246,8 +296,7 @@ final class TelegramTwoFactor
     public function completePasteLink(string $userId, string $code): LinkResult
     {
         $normalised = strtoupper(trim($code));
-        $key = $this->config->key('link', $this->hasher->hash($normalised));
-        $record = $this->store->get($key);
+        $record = $this->store->take($this->config->key('link', $this->hasher->hash($normalised)));
 
         if (! is_array($record) || ! isset($record['chat_id'])) {
             $this->logger->warning('telegram-2fa: paste code not resolvable', ['user_id' => $userId]);
@@ -256,12 +305,8 @@ final class TelegramTwoFactor
         }
 
         if (($record['expires_at'] ?? 0) < $this->clock->now()) {
-            $this->store->forget($key);
-
             return LinkResult::failed(ErrorCode::InvalidToken);
         }
-
-        $this->store->forget($key);
 
         return $this->bind($userId, (string) $record['chat_id']);
     }
@@ -277,6 +322,8 @@ final class TelegramTwoFactor
     {
         $existingForUser = $this->identities->findByUserId($userId);
 
+        $replacing = null;
+
         if ($existingForUser !== null && $existingForUser->isVerified()) {
             // Re-presenting the same chat is a double submit, not a conflict.
             if ($existingForUser->chatId === $chatId) {
@@ -287,15 +334,7 @@ final class TelegramTwoFactor
                 return LinkResult::failed(ErrorCode::AlreadyLinked);
             }
 
-            // Authorised replacement: release the old chat first so the new one
-            // can take the unique slot, and tell the old chat it is done. If
-            // the user did not request this, that message is how they find out.
-            $this->telegram->sendMessage(
-                $existingForUser->chatId,
-                $this->messages->unlinked($this->config->appName),
-            );
-
-            $this->identities->unlink($userId);
+            $replacing = $existingForUser;
         }
 
         $existingForChat = $this->identities->findByChatId($chatId);
@@ -309,16 +348,48 @@ final class TelegramTwoFactor
         }
 
         try {
+            // link() moves the binding in one write, so a replacement onto a
+            // chat that turns out to be unavailable leaves the old one intact.
+            // Releasing the old binding first and discovering the conflict
+            // afterwards would strip the account of its second factor as a side
+            // effect of a request that failed.
             $identity = $this->identities->link($userId, $chatId);
         } catch (ChatAlreadyLinked) {
-            // The store's uniqueness constraint caught what the checks above
-            // raced past. Two simultaneous links of one chat land here.
+            // The store's uniqueness constraint caught what the check above
+            // raced past. Two simultaneous links of one chat land here, and the
+            // loser's existing binding is untouched.
             return LinkResult::failed(ErrorCode::AlreadyLinked);
+        }
+
+        if ($replacing !== null) {
+            // Any code already in flight was delivered to the chat that is no
+            // longer the factor, so whoever still has that chat could use it.
+            $this->clearPending($userId);
+
+            // Afterwards, so a failed replacement never announces one. If the
+            // user did not request this, that message is how they find out.
+            $this->telegram->sendMessage(
+                $replacing->chatId,
+                $this->messages->unlinked($this->config->appName),
+            );
+
+            $this->logger->info('telegram-2fa: factor replaced', ['user_id' => $userId]);
+
+            return LinkResult::linked($identity);
         }
 
         $this->logger->info('telegram-2fa: linked', ['user_id' => $userId]);
 
         return LinkResult::linked($identity);
+    }
+
+    /**
+     * Drop any challenge in flight, and the cooldown with it.
+     */
+    private function clearPending(string $userId): void
+    {
+        $this->store->forget($this->config->key('code', $userId));
+        $this->store->forget($this->config->key('cooldown', $userId));
     }
 
     // --------------------------------------------------------------- challenge
@@ -342,7 +413,7 @@ final class TelegramTwoFactor
             return ChallengeResult::failed(ErrorCode::NotLinked);
         }
 
-        if (($blocked = $this->cooldownRemaining($userId)) !== null) {
+        if (($blocked = $this->reserveSend($userId)) !== null) {
             return ChallengeResult::failed(ErrorCode::Cooldown, $blocked);
         }
 
@@ -357,8 +428,7 @@ final class TelegramTwoFactor
             // Drop the code rather than leaving one live that the user never
             // received: otherwise the account sits in a state where the only
             // way forward is to wait out the cooldown.
-            $this->store->forget($this->config->key('code', $userId));
-            $this->store->forget($this->config->key('cooldown', $userId));
+            $this->clearPending($userId);
 
             $this->logger->error('telegram-2fa: delivery failed', ['user_id' => $userId]);
 
@@ -391,7 +461,7 @@ final class TelegramTwoFactor
             return ChallengeResult::failed(ErrorCode::NotLinked);
         }
 
-        if (($blocked = $this->cooldownRemaining($identity->userId)) !== null) {
+        if (($blocked = $this->reserveSend($identity->userId)) !== null) {
             return ChallengeResult::failed(ErrorCode::Cooldown, $blocked);
         }
 
@@ -403,8 +473,7 @@ final class TelegramTwoFactor
         );
 
         if (! $sent) {
-            $this->store->forget($this->config->key('code', $identity->userId));
-            $this->store->forget($this->config->key('cooldown', $identity->userId));
+            $this->clearPending($identity->userId);
 
             return ChallengeResult::failed(ErrorCode::SendFailed);
         }
@@ -428,43 +497,45 @@ final class TelegramTwoFactor
     private function issue(string $userId, string $purpose): string
     {
         $code = $this->codes->twoFactorCode($this->config->codeLength);
-        $now = $this->clock->now();
-        $expiresAt = $now + $this->config->codeTtl;
 
         $this->store->put(
             $this->config->key('code', $userId),
             [
-                'hash' => $this->hasher->hash($code),
-                'expires_at' => $expiresAt,
+                'hash' => $this->hasher->hash($code, $userId),
+                'expires_at' => $this->clock->now() + $this->config->codeTtl,
                 'attempts' => 0,
                 'purpose' => $purpose,
             ],
             $this->config->codeTtl,
         );
 
-        $this->store->put(
-            $this->config->key('cooldown', $userId),
-            $now + $this->config->cooldown,
-            $this->config->cooldown,
-        );
-
         return $code;
     }
 
     /**
-     * The timestamp at which another send is allowed, or null if one is allowed now.
+     * Reserve the right to send, atomically.
+     *
+     * Checking for a cooldown and then writing one is two operations, and two
+     * challenges arriving together both see no cooldown and both send. add()
+     * makes the write itself the check, so exactly one caller wins the window.
+     *
+     * @return int|null The timestamp another send becomes possible, when this
+     *                  caller lost the reservation; null when it won.
      */
-    private function cooldownRemaining(string $userId): ?int
+    private function reserveSend(string $userId): ?int
     {
-        $nextSendAt = $this->store->get($this->config->key('cooldown', $userId));
+        $key = $this->config->key('cooldown', $userId);
+        $nextSendAt = $this->clock->now() + $this->config->cooldown;
 
-        if (! is_int($nextSendAt) && ! is_numeric($nextSendAt)) {
+        if ($this->store->add($key, $nextSendAt, $this->config->cooldown)) {
             return null;
         }
 
-        $nextSendAt = (int) $nextSendAt;
+        $held = $this->store->get($key);
 
-        return $nextSendAt > $this->clock->now() ? $nextSendAt : null;
+        // Fall back to the full cooldown if the value has gone between the
+        // failed add and this read, rather than reporting a time in the past.
+        return is_numeric($held) ? (int) $held : $nextSendAt;
     }
 
     // ------------------------------------------------------------ verification
@@ -488,7 +559,15 @@ final class TelegramTwoFactor
         string $purpose = self::PURPOSE_LOGIN,
     ): VerificationResult {
         $key = $this->config->key('code', $userId);
-        $record = $this->store->get($key);
+
+        // Take the record, rather than read it and delete it later. Those are
+        // two operations with a gap between them, and two verifications
+        // arriving together both read the live record, both match, and both
+        // succeed — a single-use code used twice, with the attempt counter
+        // losing increments to the same race. Taking it means the winner holds
+        // the only copy: it either consumes the code or writes it back with one
+        // more attempt spent, while a concurrent caller finds nothing.
+        $record = $this->store->take($key);
 
         if (! is_array($record) || ! isset($record['hash'])) {
             return VerificationResult::fail(ErrorCode::Expired);
@@ -496,15 +575,13 @@ final class TelegramTwoFactor
 
         $attempts = (int) ($record['attempts'] ?? 0);
 
+        // The record is already gone in each of these branches, which is what
+        // we want: a spent or expired code should not come back.
         if ($attempts >= $this->config->maxAttempts) {
-            $this->store->forget($key);
-
             return VerificationResult::fail(ErrorCode::TooManyAttempts, 0);
         }
 
         if ((int) ($record['expires_at'] ?? 0) < $this->clock->now()) {
-            $this->store->forget($key);
-
             return VerificationResult::fail(ErrorCode::Expired);
         }
 
@@ -517,11 +594,11 @@ final class TelegramTwoFactor
             return $this->recordFailedAttempt($key, $record, $attempts);
         }
 
-        if (! $this->hasher->matches((string) $record['hash'], trim($code))) {
+        // Bound to the account, so a digest lifted from the store cannot be
+        // matched against another user's code.
+        if (! $this->hasher->matches((string) $record['hash'], trim($code), $userId)) {
             return $this->recordFailedAttempt($key, $record, $attempts);
         }
-
-        $this->store->forget($key);
 
         $this->logger->info('telegram-2fa: verified', [
             'user_id' => $userId,
@@ -533,10 +610,25 @@ final class TelegramTwoFactor
 
     /**
      * Whether a stored code may be used for the purpose being requested.
+     *
+     * An on-demand code is general-purpose by default, because it cannot know
+     * what it is for and the user asked for it deliberately. That is a policy
+     * rather than a law: requesting a code does not prove intent to perform any
+     * particular action, so an installation that wants privileged steps to
+     * issue their own code can narrow it with onDemandSatisfies.
      */
     private function purposeSatisfied(string $stored, string $requested): bool
     {
-        return $stored === $requested || $stored === self::PURPOSE_ON_DEMAND;
+        if ($stored === $requested) {
+            return true;
+        }
+
+        if ($stored !== self::PURPOSE_ON_DEMAND) {
+            return false;
+        }
+
+        return $this->config->onDemandSatisfies === null
+            || in_array($requested, $this->config->onDemandSatisfies, true);
     }
 
     /**
@@ -627,8 +719,7 @@ final class TelegramTwoFactor
     {
         $this->identities->unlink($identity->userId);
 
-        $this->store->forget($this->config->key('code', $identity->userId));
-        $this->store->forget($this->config->key('cooldown', $identity->userId));
+        $this->clearPending($identity->userId);
 
         // Best effort: the user should hear that their factor was removed even
         // if, especially if, they did not do it themselves.

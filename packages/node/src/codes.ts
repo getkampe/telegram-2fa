@@ -65,24 +65,42 @@ export class CodeGenerator {
 /**
  * Hashing and comparison of code material.
  *
- * A fast hash is correct here: these codes live for minutes, are single-use and
- * are attempt-budgeted. The hash exists so a dumped store or a leaked log yields
- * nothing replayable, not to resist offline cracking, and a password KDF would
- * add latency to every verification for no gain against a six-digit input.
+ * A fast keyed hash is the right primitive here and not a shortcut. These codes
+ * live for minutes, are single-use, and are bounded by an attempt limit; a
+ * password KDF would add latency to every verification and buy nothing against
+ * a six-digit input.
+ *
+ * What does the work is the key, not the hash. A six-digit code has only a
+ * million possible values, so an unkeyed SHA-256 of one is reversed by a table
+ * anyone can build in seconds - which is why the pepper is required rather than
+ * recommended, and why the application's own secret must not live in the same
+ * store as the hashes.
+ *
+ * The context argument binds a digest to the account it belongs to, so a stolen
+ * digest cannot be matched against another user's, and an attacker who dumps the
+ * store needs a fresh search per account rather than one table for all of them.
  */
 export class CodeHasher {
   constructor(
     private readonly algorithm = 'sha256',
     /**
-     * Optional application-wide pepper. With one set, a store dump cannot be
-     * matched against a precomputed table of all six-digit hashes - which, for
-     * six digits, is a table anyone can build in seconds.
+     * The HMAC key. Required: see the class comment for why an unkeyed digest
+     * of a six-digit code protects nothing. Config enforces a minimum length,
+     * so this is never empty in practice.
      */
     private readonly pepper = '',
   ) {}
 
-  hash(code: string): string {
-    return createHmac(this.algorithm, this.pepper).update(code).digest('hex')
+  /**
+   * @param context Data the digest is bound to - the user id for a challenge
+   * code. Must be identical at verification or the comparison cannot match.
+   */
+  hash(code: string, context = ''): string {
+    // A NUL separator, so that ("ab", "c") and ("a", "bc") cannot produce the
+    // same input. Neither value can contain a NUL byte.
+    return createHmac(this.algorithm, this.pepper)
+      .update(`${context}\0${code}`)
+      .digest('hex')
   }
 
   /**
@@ -92,9 +110,9 @@ export class CodeHasher {
    * differing byte is a timing oracle. Both operands are fixed-length hex here,
    * so the length check below never rejects a legitimate code.
    */
-  matches(storedHash: string, candidate: string): boolean {
+  matches(storedHash: string, candidate: string, context = ''): boolean {
     const expected = Buffer.from(storedHash, 'utf8')
-    const actual = Buffer.from(this.hash(candidate), 'utf8')
+    const actual = Buffer.from(this.hash(candidate, context), 'utf8')
 
     if (expected.length !== actual.length) {
       return false

@@ -97,10 +97,37 @@ export class UpdateHandler {
    *          update behind this one.
    */
   async handle(update: TelegramUpdate): Promise<boolean> {
-    if (await this.isDuplicate(update)) {
+    const claim = await this.claim(update)
+
+    if (claim === false) {
       return false
     }
 
+    let handled: boolean
+
+    try {
+      handled = await this.dispatch(update)
+    } catch (error) {
+      // Release the claim so Telegram's retry is processed rather than
+      // discarded as a duplicate. Marking an update done before its work
+      // succeeds turns one transient failure into a permanently lost
+      // operation.
+      if (claim !== null) {
+        await this.store.forget(claim)
+      }
+
+      throw error
+    }
+
+    // Only now is it really handled, so hold the claim for the full window.
+    if (claim !== null) {
+      await this.store.put(claim, 'done', this.config.updateDedupeTtl)
+    }
+
+    return handled
+  }
+
+  private async dispatch(update: TelegramUpdate): Promise<boolean> {
     if (update.callback_query !== undefined) {
       return this.handleCallback(update.callback_query)
     }
@@ -339,31 +366,44 @@ export class UpdateHandler {
   }
 
   /**
-   * Telegram retries an update it believes was not delivered, so the same
-   * update_id can arrive twice. Without this guard a retried /code mints a
-   * second code and resets the cooldown.
+   * Claim an update, so exactly one attempt processes it.
+   *
+   * Telegram retries an update it believes was not delivered, and delivers
+   * concurrently, so the same update_id can arrive more than once and at the
+   * same time. Without a claim a retried /code mints a second code and resets
+   * the cooldown.
+   *
+   * add() is the whole mechanism: checking for a marker and then writing one is
+   * two operations, and two simultaneous deliveries both find nothing and both
+   * proceed.
+   *
+   * @returns the claim key to settle, false when already claimed, null when
+   * deduplication is off or the update carries no id.
    */
-  private async isDuplicate(update: TelegramUpdate): Promise<boolean> {
+  private async claim(update: TelegramUpdate): Promise<string | false | null> {
     if (!this.config.dedupeUpdates) {
-      return false
+      return null
     }
 
     const updateId = update.update_id
 
     if (updateId === undefined) {
-      return false
+      return null
     }
 
     const key = this.config.key('update', String(updateId))
 
-    if ((await this.store.get(key)) !== null) {
+    // A short claim, not the full window: if this process dies mid-handling the
+    // claim lapses on its own and a later retry can pick the update up, rather
+    // than it being lost until the dedupe window expires.
+    const ttl = Math.max(30, Math.min(120, this.config.updateDedupeTtl))
+
+    if (!(await this.store.add(key, 'claimed', ttl))) {
       this.logger.info('telegram-2fa: duplicate update dropped', { updateId })
 
-      return true
+      return false
     }
 
-    await this.store.put(key, 1, this.config.updateDedupeTtl)
-
-    return false
+    return key
   }
 }
