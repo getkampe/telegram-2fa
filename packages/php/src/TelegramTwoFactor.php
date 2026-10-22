@@ -167,7 +167,9 @@ final class TelegramTwoFactor
         // token is void. Without this, a token minted before an account
         // recovery still moves the factor afterwards, which hands whoever holds
         // it the new chat as well.
-        if ($replace && ! $this->factorUnchanged((string) $record['user_id'], $record['factor'] ?? null)) {
+        $provenGeneration = is_string($record['generation'] ?? null) ? $record['generation'] : null;
+
+        if ($replace && ! $this->generationIsCurrent((string) $record['user_id'], $provenGeneration)) {
             $this->logger->warning('telegram-2fa: stale replacement token rejected', [
                 'user_id' => $record['user_id'],
             ]);
@@ -175,40 +177,49 @@ final class TelegramTwoFactor
             return LinkResult::failed(ErrorCode::InvalidToken);
         }
 
-        return $this->bind((string) $record['user_id'], $chatId, replace: $replace);
+        return $this->bind(
+            (string) $record['user_id'],
+            $chatId,
+            replace: $replace,
+            provenGeneration: $provenGeneration,
+        );
     }
 
     /**
-     * Whether the binding a replacement token was issued against still stands.
+     * Whether the enrollment a replacement token was issued against is current.
+     *
+     * The token records the generation it proved. Any transition since —
+     * recovery, unlinking, another replacement — has changed it, so the proof
+     * refers to an enrollment that no longer exists.
+     *
+     * This check is advisory: it gives a clear error early. The binding write
+     * repeats it as a condition, which is what actually makes it safe, because
+     * a recovery can land between this read and that write.
      */
-    private function factorUnchanged(string $userId, mixed $fingerprint): bool
+    private function generationIsCurrent(string $userId, mixed $generation): bool
     {
-        if (! is_string($fingerprint) || $fingerprint === '') {
+        if (! is_string($generation) || $generation === '') {
             return false;
         }
 
         $identity = $this->identities->findByUserId($userId);
 
-        if ($identity === null || ! $identity->isVerified()) {
+        if ($identity === null || ! $identity->isVerified() || $identity->generation === null) {
             return false;
         }
 
-        return hash_equals($this->factorFingerprint($identity), $fingerprint);
+        return hash_equals($identity->generation, $generation);
     }
 
     /**
-     * Identifies one particular binding, so that authority over it cannot carry
-     * over to a later one.
+     * A fresh enrollment generation.
      *
-     * The chat and the moment it was verified are enough: any unlink, relink or
-     * replacement changes the verification timestamp, and therefore this value.
+     * Random rather than a counter: nothing needs ordering, only inequality,
+     * and a random value cannot be predicted from the ones before it.
      */
-    private function factorFingerprint(Identity $identity): string
+    private function nextGeneration(): string
     {
-        return $this->hasher->hash(
-            $identity->chatId . '|' . (string) $identity->linkedAt,
-            'factor',
-        );
+        return bin2hex(random_bytes(16));
     }
 
     /**
@@ -240,6 +251,32 @@ final class TelegramTwoFactor
             return $proof;
         }
 
+        // Re-read: verify() may have advanced nothing, but the enrollment can
+        // have moved while we were checking the code, and the token must
+        // reference the generation that is current at the moment it is minted.
+        $identity = $this->identities->findByUserId($userId);
+
+        if ($identity === null || ! $identity->isVerified()) {
+            return VerificationResult::fail(ErrorCode::NotLinked);
+        }
+
+        if ($identity->generation === null) {
+            // A row enrolled before the generation column existed. Give it one
+            // before issuing authority over it, so the token has something
+            // concrete to reference and upgrading does not silently produce
+            // tokens that can never be validated.
+            $identity = $this->identities->transition(
+                $userId,
+                $identity->chatId,
+                null,
+                $this->nextGeneration(),
+            );
+
+            if ($identity === null) {
+                return VerificationResult::fail(ErrorCode::NotLinked);
+            }
+        }
+
         $token = $this->codes->deepLinkToken();
         $expiresAt = $this->clock->now() + $this->config->linkTtl;
 
@@ -247,15 +284,17 @@ final class TelegramTwoFactor
         // resolves it. Taking it from the resolution side would make the proof
         // above skippable by presenting an ordinary token.
         //
-        // The fingerprint pins the authority to the binding just proved, so the
-        // token dies the moment that binding does.
+        // The generation pins the authority to the enrollment just proved. The
+        // binding write repeats this as its CAS expectation, so a recovery
+        // landing between here and there makes that write fail rather than
+        // overwrite the recovered enrollment.
         $this->store->put(
             $this->config->key('link', $this->hasher->hash($token)),
             [
                 'user_id' => $userId,
                 'expires_at' => $expiresAt,
                 'replace' => true,
-                'factor' => $this->factorFingerprint($identity),
+                'generation' => $identity->generation,
             ],
             $this->config->linkTtl,
         );
@@ -312,34 +351,47 @@ final class TelegramTwoFactor
     }
 
     /**
-     * Record the binding, refusing anything that would create a shared factor.
+     * Record the enrollment, as one conditional transition.
      *
-     * @param  bool  $replace  Whether the token carried the replace mark of
-     *                         startChatReplacement(), which is the only thing
-     *                         that authorises moving a verified binding.
+     * Everything here hangs on handing the store an expectation rather than
+     * reading state and then writing it. The validation in completeDeepLink
+     * happens a moment earlier, and a recovery or a competing link can land in
+     * between; passing the generation we believed was current means such a
+     * write fails instead of overwriting whatever replaced it.
+     *
+     * @param  bool  $replace  Whether the token carried the replace mark, which
+     *                         is the only thing that authorises moving a
+     *                         verified enrollment.
+     * @param  string|null  $provenGeneration  For a replacement, the generation
+     *                         the token proved; it becomes the CAS expectation.
      */
-    private function bind(string $userId, string $chatId, bool $replace = false): LinkResult
-    {
-        $existingForUser = $this->identities->findByUserId($userId);
-
+    private function bind(
+        string $userId,
+        string $chatId,
+        bool $replace = false,
+        ?string $provenGeneration = null,
+    ): LinkResult {
+        $existing = $this->identities->findByUserId($userId);
         $replacing = null;
 
-        if ($existingForUser !== null && $existingForUser->isVerified()) {
+        if ($existing !== null && $existing->isVerified()) {
             // Re-presenting the same chat is a double submit, not a conflict.
-            if ($existingForUser->chatId === $chatId) {
-                return LinkResult::linked($existingForUser);
+            if ($existing->chatId === $chatId) {
+                return LinkResult::linked($existing);
             }
 
             if (! $replace) {
                 return LinkResult::failed(ErrorCode::AlreadyLinked);
             }
 
-            $replacing = $existingForUser;
+            $replacing = $existing;
         }
 
-        $existingForChat = $this->identities->findByChatId($chatId);
+        $expected = $replace ? $provenGeneration : ($existing?->generation ?? null);
 
-        if ($existingForChat !== null && $existingForChat->userId !== $userId) {
+        $holder = $this->identities->findByChatId($chatId);
+
+        if ($holder !== null && $holder->userId !== $userId) {
             $this->logger->warning('telegram-2fa: chat already linked to another account', [
                 'user_id' => $userId,
             ]);
@@ -348,28 +400,47 @@ final class TelegramTwoFactor
         }
 
         try {
-            // link() moves the binding in one write, so a replacement onto a
-            // chat that turns out to be unavailable leaves the old one intact.
-            // Releasing the old binding first and discovering the conflict
-            // afterwards would strip the account of its second factor as a side
+            // One write. It either moves the enrollment or changes nothing, so
+            // a replacement onto an unavailable chat — or one overtaken by a
+            // recovery — leaves the existing enrollment exactly as it was,
+            // rather than stripping the account of its second factor as a side
             // effect of a request that failed.
-            $identity = $this->identities->link($userId, $chatId);
+            $identity = $this->identities->transition(
+                $userId,
+                $chatId,
+                $expected,
+                $this->nextGeneration(),
+            );
         } catch (ChatAlreadyLinked) {
             // The store's uniqueness constraint caught what the check above
-            // raced past. Two simultaneous links of one chat land here, and the
-            // loser's existing binding is untouched.
+            // raced past. The loser's existing enrollment is untouched.
             return LinkResult::failed(ErrorCode::AlreadyLinked);
         }
 
+        if ($identity === null) {
+            // The enrollment changed under us. For a replacement that means the
+            // token is stale; for a first link, that another request got there.
+            $this->logger->warning('telegram-2fa: enrollment changed during link', [
+                'user_id' => $userId,
+                'replace' => $replace,
+            ]);
+
+            return LinkResult::failed(
+                $replace ? ErrorCode::InvalidToken : ErrorCode::AlreadyLinked
+            );
+        }
+
         if ($replacing !== null) {
-            // Any code already in flight was delivered to the chat that is no
-            // longer the factor, so whoever still has that chat could use it.
+            // Any code in flight was delivered to the chat that is no longer
+            // the factor, so whoever still has that chat could use it. The
+            // generation has already changed, so such a code is unusable even
+            // if this cleanup loses a race; this merely stops it lingering.
             $this->clearPending($userId);
 
             // Afterwards, so a failed replacement never announces one. If the
             // user did not request this, that message is how they find out.
             $this->telegram->sendMessage(
-                $replacing->chatId,
+                $replacing->chatId ?? '',
                 $this->messages->unlinked($this->config->appName),
             );
 
@@ -417,18 +488,19 @@ final class TelegramTwoFactor
             return ChallengeResult::failed(ErrorCode::Cooldown, $blocked);
         }
 
-        $code = $this->issue($userId, $purpose);
+        $challenge = $this->issue($userId, $purpose, $identity->generation);
 
         $sent = $this->telegram->sendMessage(
-            $identity->chatId,
-            $this->messages->code($code, $this->config->codeTtl),
+            $identity->chatId ?? '',
+            $this->messages->code($challenge['code'], $this->config->codeTtl),
         );
 
         if (! $sent) {
             // Drop the code rather than leaving one live that the user never
             // received: otherwise the account sits in a state where the only
-            // way forward is to wait out the cooldown.
-            $this->clearPending($userId);
+            // way forward is to wait out the cooldown. Conditionally, so a
+            // slow failure cannot delete a code issued after it.
+            $this->discardChallenge($userId, $challenge['challenge_id']);
 
             $this->logger->error('telegram-2fa: delivery failed', ['user_id' => $userId]);
 
@@ -465,15 +537,15 @@ final class TelegramTwoFactor
             return ChallengeResult::failed(ErrorCode::Cooldown, $blocked);
         }
 
-        $code = $this->issue($identity->userId, $purpose);
+        $challenge = $this->issue($identity->userId, $purpose, $identity->generation);
 
         $sent = $this->telegram->sendMessage(
             $chatId,
-            $this->messages->code($code, $this->config->codeTtl),
+            $this->messages->code($challenge['code'], $this->config->codeTtl),
         );
 
         if (! $sent) {
-            $this->clearPending($identity->userId);
+            $this->discardChallenge($identity->userId, $challenge['challenge_id']);
 
             return ChallengeResult::failed(ErrorCode::SendFailed);
         }
@@ -494,9 +566,13 @@ final class TelegramTwoFactor
      * Returns the plaintext to exactly one caller, which sends it and discards
      * it. Nothing else in the library sees it.
      */
-    private function issue(string $userId, string $purpose): string
+    /**
+     * @return array{code: string, challenge_id: string}
+     */
+    private function issue(string $userId, string $purpose, ?string $generation): array
     {
         $code = $this->codes->twoFactorCode($this->config->codeLength);
+        $challengeId = bin2hex(random_bytes(8));
 
         $this->store->put(
             $this->config->key('code', $userId),
@@ -505,11 +581,49 @@ final class TelegramTwoFactor
                 'expires_at' => $this->clock->now() + $this->config->codeTtl,
                 'attempts' => 0,
                 'purpose' => $purpose,
+                // The enrollment this challenge belongs to. Verification
+                // refuses a challenge from a superseded enrollment, which is
+                // what stops a code outliving the chat it was sent to.
+                'generation' => $generation,
+                // Identifies this particular challenge, so a cleanup for a
+                // failed delivery can tell its own code from a newer one.
+                'challenge_id' => $challengeId,
             ],
             $this->config->codeTtl,
         );
 
-        return $code;
+        return ['code' => $code, 'challenge_id' => $challengeId];
+    }
+
+    /**
+     * Drop a challenge only if it is still the one we issued.
+     *
+     * A delivery failure must not delete a newer challenge. That is reachable:
+     * if sending blocks past the cooldown, the user can be issued a fresh code
+     * before this handler runs, and an unconditional delete would throw away a
+     * code the user is holding.
+     */
+    private function discardChallenge(string $userId, string $challengeId): void
+    {
+        $key = $this->config->key('code', $userId);
+        $record = $this->store->take($key);
+
+        if (! is_array($record)) {
+            return;
+        }
+
+        if (($record['challenge_id'] ?? null) !== $challengeId) {
+            // Someone else's challenge. Put it back as we found it.
+            $this->store->put(
+                $key,
+                $record,
+                max(1, (int) ($record['expires_at'] ?? 0) - $this->clock->now()),
+            );
+
+            return;
+        }
+
+        $this->store->forget($this->config->key('cooldown', $userId));
     }
 
     /**
@@ -585,19 +699,34 @@ final class TelegramTwoFactor
             return VerificationResult::fail(ErrorCode::Expired);
         }
 
+        // The enrollment this challenge belongs to must still be the current
+        // one. Anything that changed it — a replacement, an unlink, a recovery
+        // — revoked this challenge, and the record is already gone because we
+        // took it, so a revoked challenge dies here rather than being restored.
+        //
+        // This check, not the cleanup in bind(), is what makes revocation
+        // sound: cleanup races a concurrent verification, while this cannot.
+        if (! $this->generationMatches($userId, $record['generation'] ?? null)) {
+            $this->logger->warning('telegram-2fa: challenge from a superseded enrollment', [
+                'user_id' => $userId,
+            ]);
+
+            return VerificationResult::fail(ErrorCode::Expired);
+        }
+
         if (! $this->purposeSatisfied((string) ($record['purpose'] ?? ''), $purpose)) {
             // A code minted to confirm a login should not also confirm a
             // withdrawal. Count it as an attempt rather than a free retry, and
             // report it as `invalid`: telling the caller that a live code
             // exists for some other purpose is information it has not proved
             // it should have.
-            return $this->recordFailedAttempt($key, $record, $attempts);
+            return $this->recordFailedAttempt($key, $record, $attempts, $userId);
         }
 
         // Bound to the account, so a digest lifted from the store cannot be
         // matched against another user's code.
         if (! $this->hasher->matches((string) $record['hash'], trim($code), $userId)) {
-            return $this->recordFailedAttempt($key, $record, $attempts);
+            return $this->recordFailedAttempt($key, $record, $attempts, $userId);
         }
 
         $this->logger->info('telegram-2fa: verified', [
@@ -632,9 +761,32 @@ final class TelegramTwoFactor
     }
 
     /**
+     * Whether a challenge belongs to the account's current enrollment.
+     *
+     * A challenge issued before the enrollment generation existed (a row
+     * migrated from an older version) is accepted only while the account has no
+     * generation at all, so upgrading does not invalidate codes in flight.
+     */
+    private function generationMatches(string $userId, mixed $generation): bool
+    {
+        $current = $this->identities->findByUserId($userId)?->generation;
+
+        if ($current === null) {
+            return $generation === null;
+        }
+
+        return is_string($generation) && hash_equals($current, $generation);
+    }
+
+    /**
      * @param  array<string, mixed>  $record
      */
-    private function recordFailedAttempt(string $key, array $record, int $attempts): VerificationResult
+    private function recordFailedAttempt(
+        string $key,
+        array $record,
+        int $attempts,
+        string $userId,
+    ): VerificationResult
     {
         $attempts++;
         $remaining = $this->config->maxAttempts - $attempts;
@@ -685,7 +837,11 @@ final class TelegramTwoFactor
             return $result;
         }
 
-        $this->detach($identity);
+        if (! $this->detach($identity, $identity->generation)) {
+            // The enrollment moved while we were verifying, so the code we
+            // just accepted no longer refers to what is stored.
+            return VerificationResult::fail(ErrorCode::Expired);
+        }
 
         return VerificationResult::pass();
     }
@@ -705,7 +861,9 @@ final class TelegramTwoFactor
             return false;
         }
 
-        $this->detach($identity);
+        // Unconditional: the caller has proved identity by other means, and a
+        // recovery must not be blocked by whatever the account's state is.
+        $this->detach($identity, IdentityStore::ANY_GENERATION);
 
         $this->logger->warning('telegram-2fa: unlinked via external proof', [
             'user_id' => $userId,
@@ -715,19 +873,51 @@ final class TelegramTwoFactor
         return true;
     }
 
-    private function detach(Identity $identity): void
+    /**
+     * Remove the enrollment and revoke everything that referred to it.
+     *
+     * The generation is advanced even though no chat remains, which is the
+     * whole reason it is stored separately from the chat id: a replacement
+     * token or a challenge minted before this point stays void afterwards, and
+     * would otherwise come back to life the moment the user links again.
+     *
+     * @param  string|null  $expected  The generation the caller verified
+     *                                 against, or ANY_GENERATION for a
+     *                                 recovery, where the caller has already
+     *                                 proved identity another way and must not
+     *                                 be blocked by a concurrent change.
+     * @return bool Whether the transition applied.
+     */
+    private function detach(Identity $identity, ?string $expected): bool
     {
-        $this->identities->unlink($identity->userId);
+        $moved = $this->identities->transition(
+            $identity->userId,
+            null,
+            $expected,
+            $this->nextGeneration(),
+        );
+
+        if ($moved === null) {
+            $this->logger->warning('telegram-2fa: enrollment changed during unlink', [
+                'user_id' => $identity->userId,
+            ]);
+
+            return false;
+        }
 
         $this->clearPending($identity->userId);
 
         // Best effort: the user should hear that their factor was removed even
         // if, especially if, they did not do it themselves.
-        $this->telegram->sendMessage(
-            $identity->chatId,
-            $this->messages->unlinked($this->config->appName),
-        );
+        if ($identity->chatId !== null) {
+            $this->telegram->sendMessage(
+                $identity->chatId,
+                $this->messages->unlinked($this->config->appName),
+            );
+        }
 
         $this->logger->info('telegram-2fa: unlinked', ['user_id' => $identity->userId]);
+
+        return true;
     }
 }

@@ -136,7 +136,7 @@ final class PurposeTest extends TestCase
     public function test_the_on_demand_exemption_can_be_narrowed(): void
     {
         $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
 
         $tfa->pull('555000111');
         $code = $this->lastCode();
@@ -154,7 +154,7 @@ final class PurposeTest extends TestCase
     public function test_narrowing_the_exemption_still_allows_a_purpose_specific_code(): void
     {
         $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
 
         $tfa->push('user-1', 'withdrawal');
 
@@ -164,7 +164,7 @@ final class PurposeTest extends TestCase
     public function test_narrowing_the_exemption_blocks_on_demand_unlinking(): void
     {
         $tfa = $this->withConfig(['on_demand_satisfies' => ['login']]);
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
 
         $tfa->pull('555000111');
 

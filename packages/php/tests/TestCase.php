@@ -82,7 +82,7 @@ abstract class TestCase extends BaseTestCase
      */
     protected function linked(string $userId = 'user-1', string $chatId = '555000111'): void
     {
-        $this->identities->link($userId, $chatId);
+        $this->identities->seed($userId, $chatId, 'gen-' . $userId);
     }
 
     /**

@@ -22,11 +22,26 @@ return new class extends Migration
             // not treat it as a second factor.
             $table->timestamp('telegram_linked_at')->nullable();
 
+            // The enrollment generation: an opaque value that changes on every
+            // transition — linking, replacing, unlinking, recovery.
+            //
+            // It deliberately survives unlinking. Anything holding authority
+            // over an enrollment (a pending replacement token, a challenge in
+            // flight) records this value and is refused once it differs, so
+            // revocation outlives the binding it revoked. If this were cleared
+            // on unlink, a token minted beforehand would come back to life the
+            // moment the user linked again.
+            $table->string('telegram_enrollment', 64)->nullable();
+
             // The uniqueness guarantee that matters. Without it, one Telegram
             // account can be the second factor for many accounts, so one
             // compromised Telegram account compromises all of them. The
             // application checks this too, but two concurrent links both pass
             // that check and only one can pass this.
+            //
+            // Nullable columns permit many NULLs under a unique index in
+            // MySQL, PostgreSQL and SQLite, so unlinked accounts do not
+            // collide with each other.
             $table->unique('telegram_chat_id');
         });
     }
@@ -35,7 +50,11 @@ return new class extends Migration
     {
         Schema::table('users', function (Blueprint $table) {
             $table->dropUnique(['telegram_chat_id']);
-            $table->dropColumn(['telegram_chat_id', 'telegram_linked_at']);
+            $table->dropColumn([
+                'telegram_chat_id',
+                'telegram_linked_at',
+                'telegram_enrollment',
+            ]);
         });
     }
 };

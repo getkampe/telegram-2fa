@@ -31,7 +31,12 @@ describe('challenge', () => {
     const h = harness()
     // A chat id present with no verification timestamp: a link that was started
     // and never finished.
-    h.identities.findByUserId = async (userId) => ({ userId, chatId: '999', linkedAt: null })
+    h.identities.findByUserId = async (userId) => ({
+      userId,
+      chatId: '999',
+      linkedAt: null,
+      generation: 'gen-partial',
+    })
 
     const result = await h.tfa.push('user-1')
 

@@ -11,17 +11,17 @@ use Kampe\TelegramTwoFactor\Results\Identity;
 use Kampe\TelegramTwoFactor\Support\SystemClock;
 
 /**
- * An in-memory identity store, for tests and for working out an integration
+ * An in-memory identity store, for tests and for sketching an integration
  * before wiring it to a database.
  *
- * It models the uniqueness rule a real store must enforce with a constraint:
- * one chat belongs to one user, and a second claim on it is refused rather than
- * allowed to overwrite the first.
+ * It models both rules a real store must enforce: one chat belongs to one
+ * account, and a transition only applies when the stored generation is the one
+ * the caller expected. Rows survive unlinking, because the generation has to.
  */
 final class ArrayIdentityStore implements IdentityStore
 {
     /** @var array<string, Identity> keyed by user id */
-    private array $byUser = [];
+    private array $rows = [];
 
     private readonly Clock $clock;
 
@@ -32,13 +32,13 @@ final class ArrayIdentityStore implements IdentityStore
 
     public function findByUserId(string $userId): ?Identity
     {
-        return $this->byUser[$userId] ?? null;
+        return $this->rows[$userId] ?? null;
     }
 
     public function findByChatId(string $chatId): ?Identity
     {
-        foreach ($this->byUser as $identity) {
-            if ($identity->chatId === $chatId) {
+        foreach ($this->rows as $identity) {
+            if ($identity->chatId !== null && $identity->chatId === $chatId) {
                 return $identity;
             }
         }
@@ -46,24 +46,51 @@ final class ArrayIdentityStore implements IdentityStore
         return null;
     }
 
-    public function link(string $userId, string $chatId): Identity
-    {
-        $holder = $this->findByChatId($chatId);
+    public function transition(
+        string $userId,
+        ?string $chatId,
+        ?string $expected,
+        string $next,
+    ): ?Identity {
+        $current = $this->rows[$userId] ?? null;
 
-        if ($holder !== null && $holder->userId !== $userId) {
-            throw new ChatAlreadyLinked(
-                'That Telegram chat is already the second factor for another account.'
-            );
+        if ($expected !== self::ANY_GENERATION && ($current?->generation ?? null) !== $expected) {
+            // The expectation failed, so the stored row is left exactly as it
+            // was. Returning null rather than throwing lets the caller decide
+            // whether this is a conflict or a stale token.
+            return null;
         }
 
-        $identity = new Identity($userId, $chatId, $this->clock->now());
-        $this->byUser[$userId] = $identity;
+        if ($chatId !== null) {
+            $holder = $this->findByChatId($chatId);
+
+            if ($holder !== null && $holder->userId !== $userId) {
+                throw new ChatAlreadyLinked(
+                    'That Telegram chat is already the second factor for another account.'
+                );
+            }
+        }
+
+        $identity = new Identity(
+            $userId,
+            $chatId,
+            $chatId === null ? null : $this->clock->now(),
+            $next,
+        );
+
+        $this->rows[$userId] = $identity;
 
         return $identity;
     }
 
-    public function unlink(string $userId): void
+    /**
+     * Test helper: seed a verified enrollment without going through a flow.
+     */
+    public function seed(string $userId, string $chatId, string $generation): Identity
     {
-        unset($this->byUser[$userId]);
+        $identity = new Identity($userId, $chatId, $this->clock->now(), $generation);
+        $this->rows[$userId] = $identity;
+
+        return $identity;
     }
 }

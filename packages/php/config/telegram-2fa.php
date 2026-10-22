@@ -74,7 +74,28 @@ return [
     'columns' => [
         'chat_id' => 'telegram_chat_id',
         'linked_at' => 'telegram_linked_at',
+
+        // The enrollment generation. It changes on every transition and
+        // survives unlinking, so authority over a removed enrollment stays
+        // revoked even after the account links again.
+        'enrollment' => 'telegram_enrollment',
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Local cache stores
+    |--------------------------------------------------------------------------
+    |
+    | The package refuses the array and file cache stores, because neither is
+    | shared between the processes serving your requests: their data and their
+    | locks are local, so one worker cannot see a code another issued, and two
+    | workers can verify the same code.
+    |
+    | Set this to true only for tests or a single-process script.
+    |
+    */
+
+    'permit_local_cache_store' => false,
 
     // null uses the application default log channel.
     'log_channel' => env('TELEGRAM_2FA_LOG_CHANNEL'),

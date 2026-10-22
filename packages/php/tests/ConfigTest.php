@@ -138,8 +138,8 @@ final class ConfigTest extends TestCase
      */
     public function test_a_code_record_is_bound_to_its_account(): void
     {
-        $this->identities->link('user-1', '555000111');
-        $this->identities->link('user-2', '777000222');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
+        $this->identities->seed('user-2', '777000222', 'gen-user-2');
 
         $this->tfa->push('user-1');
         $code = $this->lastCode();
@@ -187,7 +187,7 @@ final class ConfigTest extends TestCase
     {
         // UUID primary keys are common, so nothing may assume an integer.
         $uuid = '9b7c2f0e-4d5a-4c21-8f3b-1a2b3c4d5e6f';
-        $this->identities->link($uuid, '555000111');
+        $this->identities->seed($uuid, '555000111', 'gen-' . $uuid);
 
         $this->assertTrue($this->tfa->push($uuid)->ok);
         $this->assertTrue($this->tfa->verify($uuid, $this->lastCode())->ok);

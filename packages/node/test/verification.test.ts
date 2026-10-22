@@ -113,7 +113,7 @@ describe('verification', () => {
   it('treats a user id as an opaque string', async () => {
     const h = harness()
     const uuid = '9b7c2f0e-4d5a-4c21-8f3b-1a2b3c4d5e6f'
-    await h.identities.link(uuid, '555000111')
+    await h.identities.seed(uuid, '555000111', `gen-${uuid}`)
 
     assert.equal((await h.tfa.push(uuid)).ok, true)
     assert.equal((await h.tfa.verify(uuid, h.lastCode())).ok, true)

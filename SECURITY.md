@@ -218,10 +218,21 @@ spent, and a concurrent caller finds nothing. Cooldowns, link-token consumption
 and the webhook's idempotency marker use the same primitives.
 
 Choosing Redis does not by itself fix this; a get-check-delete sequence against
-Redis races exactly as happily. On Laravel, use the `redis` or `memcached` cache
-store: `database`, `file` and `array` do not give `pull()` an atomic primitive
-to stand on. The Node Redis store refuses to construct against a client with
-neither `GETDEL` nor `EVAL`, rather than silently racing.
+Redis races exactly as happily. Neither does a framework helper that reads like
+one operation — Laravel's `Cache::pull()` is `get()` then `forget()` on *every*
+driver, and an earlier revision of this package was built on it and said in a
+comment that Redis made it atomic. It never did.
+
+The Laravel adapter therefore serialises every mutation of a key behind that
+store's own named lock, and refuses a store that cannot provide one. `array` and
+`file` are refused outright: their data and their locks are per-process and
+per-server respectively, so the next worker sees neither. The Node Redis store
+resolves `GETDEL`/`EVAL` at construction and throws if the client has neither.
+
+**Honest limit:** where the atomicity comes from a lock, the guarantee is
+exactly as strong as the lock driver. Redis and Memcached locks are
+cross-process; nothing in this package can verify that your Redis is not, say, a
+cluster of independent nodes behind one address.
 
 ### T9 — Authority that outlives the factor it was granted over
 
@@ -232,10 +243,17 @@ present the old token. If it only records "this user may replace their chat", it
 is honoured, and the attacker's chat becomes the second factor for an account
 they never had access to.
 
-**The mitigation.** A replacement token identifies the *binding* whose
-possession was proved, by a keyed digest of the chat id and its verification
-time. Any unlink, relink or replacement changes that, and resolution rejects a
-token whose binding is no longer current.
+**The mitigation.** A replacement token records the *enrollment generation* it
+proved — a random 128-bit value, changed by every transition and kept when the
+account is unlinked — and that value is the expectation of the conditional write
+that rebinds the chat.
+
+Two details, both learned the hard way. The generation must not be derived from
+the state it distinguishes: a digest of the chat id and its verification
+timestamp repeats when the same chat is unlinked and relinked inside one second,
+which revives every token minted beforehand. And checking it before writing is
+not enough, because a recovery can land in between; the check has to *be* the
+write, as a compare-and-set.
 
 The related failure is quieter: a replacement that is refused must not cost the
 user the factor they already had. Releasing the old binding before checking the
@@ -245,7 +263,16 @@ leaves the old one untouched, and the old chat is not told it has been unlinked
 until the move has succeeded.
 
 Codes already in flight are dropped when a binding moves, since a code delivered
-to the old chat is proof in the hands of whoever still holds that chat.
+to the old chat is proof in the hands of whoever still holds that chat. More
+importantly, each challenge carries the generation it was issued against and is
+refused at acceptance if that generation is no longer current — so a challenge
+that survives the cleanup, by racing it, is inert rather than dangerous.
+
+**Honest limit:** preventing a stale challenge from being written back is
+best-effort, because a verification that has already taken the record can be
+racing the revocation. What is guaranteed is that such a record cannot be
+accepted. The packages do not claim the stronger property, and a test asserts
+the weaker one by resurrecting a record by hand.
 
 ### T10 — The bot as an amplifier
 
@@ -269,7 +296,33 @@ bot added to a group never issues a code in front of its members.
 
 ---
 
+## What is enforced, and what is not
+
+Enforced by the adapters, with a test that fails if the protection is removed:
+
+- exactly one success among concurrent correct verifications
+- the attempt budget preserved under concurrent failures
+- every enrollment change conditional on the generation, a conflict leaving the
+  current binding untouched
+- revocation surviving unlink and relink, including inside one second
+- a challenge from a superseded enrollment never accepted
+- a delivery failure dropping only its own challenge
+- a refused replacement leaving the original binding in place
+
+Not claimed:
+
+- **No cross-store transaction.** The identity store and the code store are
+  different systems. What makes the gap between them safe is the generation
+  check at acceptance, not a distributed transaction.
+- **Lock-driver dependence**, as described in T8.
+- **No protection against a compromised Telegram account**, which is inherent to
+  the factor rather than a defect — see the top of this document.
+
 ## Deployment checklist
+
+Upgrading an existing install first: [docs/migration.md](docs/migration.md) —
+there is a new column, two newly refused cache drivers and a now-required
+secret.
 
 - [ ] `TELEGRAM_WEBHOOK_SECRET` set, 32+ characters, and the webhook registered
       with it (`php artisan telegram:webhook`, or `setWebhook` directly).

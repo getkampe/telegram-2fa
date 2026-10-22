@@ -32,7 +32,7 @@ The user is signed in, on a settings page, and taps a button.
       │    get link:h(nonce) → {userId}                         │
       │    forget link:h(nonce)        ← single use, burned     │
       │    reject if user or chat already linked                │
-      │    identities.link(userId, chatId)                      │
+      │    transition(userId, chatId, expected, next)            │
       │                                                         │
       ├── "this chat is now your second factor" ───────────────►│
 ```
@@ -66,7 +66,7 @@ User                      Bot/Webhook                           App
  │                                      completePasteLink(userId, code)
  │                                        get link:h(code) → {chatId}
  │                                        forget link:h(code)
- │                                        identities.link(userId, chatId)
+ │                                      transition(userId, chatId, exp, next)
 ```
 
 **The endpoint must be authenticated and rate-limited.** `userId` comes from the
@@ -259,7 +259,32 @@ is how the user finds out.
 | `code:<userId>` | `push`, `pull` | `verify` (takes it) | any verification, budget spent, expiry, unlink, replacement |
 | `cooldown:<userId>` | `push`, `pull` (reserve) | the reservation itself | TTL, delivery failure, unlink, replacement |
 | `update:<updateId>` | the update handler | the update handler | TTL |
-| chat id + linkedAt | `link` | everything | `unlink` |
+| chat id + linkedAt + generation | `transition` | everything | `transition` (the generation is kept, and changed, on unlink) |
 
 Everything except the last row is short-lived cache. Losing the cache logs
 nobody out; it only invalidates codes in flight, and the user requests another.
+
+### Enrollment transitions
+
+Every change to the last row goes through one conditional operation:
+
+```
+transition(userId, chatId | null, expectedGeneration, nextGeneration)
+  → the new state, or nothing when expectedGeneration is not current
+```
+
+| Operation | expected | chatId |
+| --- | --- | --- |
+| first link | the current generation (often null) | the new chat |
+| replacement | the generation the token proved | the new chat |
+| unlink | the current generation | null |
+| recovery | ANY (unconditional) | null |
+
+The expectation is the whole mechanism. Validating and then writing leaves a gap
+in which a recovery can land, and the write would then apply to an enrollment it
+never checked. A conflict changes nothing, so a refused replacement cannot cost
+the user the factor they already had.
+
+Challenges carry the generation they were issued against, and verification
+refuses one whose generation is no longer current — which is what makes
+revocation sound, since the cleanup alone races concurrent verifications.

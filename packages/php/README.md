@@ -173,9 +173,9 @@ show a user.
 | Interface | Methods | Bundled implementations |
 | --- | --- | --- |
 | `CodeStore` | `get`, `put`, `forget`, `take`, `add` | `Stores\ArrayCodeStore`, `Laravel\CacheCodeStore` |
-| `IdentityStore` | `findByUserId`, `findByChatId`, `link`, `unlink` | `Stores\ArrayIdentityStore`, `Laravel\EloquentIdentityStore` |
+| `IdentityStore` | `findByUserId`, `findByChatId`, `transition` | `Stores\ArrayIdentityStore`, `Laravel\EloquentIdentityStore` |
 | `TelegramClient` | `sendMessage`, `answerCallbackQuery`, `getMe`, `setWebhook`, `deleteWebhook` | `Telegram\HttpTelegramClient` (curl) |
-| `Messages` | 10 string methods | `Telegram\DefaultMessages` (English) |
+| `Messages` | 11 string methods | `Telegram\DefaultMessages` (English) |
 | `Clock` | `now` | `Support\SystemClock`, `Support\FrozenClock` |
 | `Logger` | `info`, `warning`, `error` | `Support\NullLogger`, `Support\PsrLogger` |
 
@@ -217,9 +217,22 @@ attempt counter loses increments to the same lost update.
 stored, which makes the cooldown and the webhook claim a reservation exactly one
 caller can win.
 
-On Laravel this means using the `redis` or `memcached` cache store. `pull()` is
-only as atomic as the driver underneath it, and `database`, `file` and `array`
-do not provide the primitive.
+On Laravel this means the `redis` or `memcached` cache store, and `CacheCodeStore`
+refuses anything that cannot give it a lock — `array` and `file` outright, since
+their data and their locks are per-process and per-server.
+
+It does not use `Cache::pull()`. That helper reads like an atomic take and is
+`get()` then `forget()` on every driver, so a verification built on it races
+exactly as a hand-written pair would; an earlier revision of this package was
+built on it and claimed otherwise in a comment. Every mutation is instead
+serialised behind the store's own named lock, which means the guarantee is as
+strong as the lock driver and no stronger.
+
+`IdentityStore` has one mutating method for the same family of reasons: a
+`link`/`unlink` pair invites read-then-write, and the window between validating
+a replacement token and writing the binding is where that token outlives the
+enrollment it proved. `transition()` takes the generation you expect and either
+applies or changes nothing.
 
 ## Requirements
 
@@ -236,5 +249,8 @@ composer install
 composer test
 ```
 
-116 tests written clause by clause against the specification, including the
-cross-language fixtures in `/conformance` that the Node package also reads.
+133 tests written clause by clause against the specification, including the
+cross-language fixtures in `/conformance` that the Node package also reads, the
+production Laravel cache adapter against real Illuminate stores, and the
+concurrency cases in `ConcurrencyTest` and `TransitionRaceTest` — each of which
+has been checked by removing the protection it covers and confirming it fails.

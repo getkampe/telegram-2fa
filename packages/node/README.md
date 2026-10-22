@@ -50,70 +50,72 @@ seconds.
 
 ### The identity store
 
-Four methods over your own users table. In Prisma:
+Three methods over your own users table. In Prisma:
 
 ```ts
-import { ChatAlreadyLinked, type Identity, type IdentityStore } from '@kampe/telegram-2fa'
+import { ANY_GENERATION, ChatAlreadyLinked, type Identity, type IdentityStore } from '@kampe/telegram-2fa'
+
+const toIdentity = (u: {
+  id: string
+  telegramChatId: string | null
+  telegramLinkedAt: Date | null
+  telegramEnrollment: string | null
+}): Identity => ({
+  userId: u.id,
+  chatId: u.telegramChatId,
+  linkedAt: u.telegramLinkedAt === null ? null : Math.floor(u.telegramLinkedAt.getTime() / 1000),
+  generation: u.telegramEnrollment,
+})
 
 const identities: IdentityStore = {
   async findByUserId(userId) {
     const user = await prisma.user.findUnique({ where: { id: userId } })
 
-    if (user?.telegramChatId == null) return null
-
-    return {
-      userId,
-      chatId: user.telegramChatId,
-      linkedAt: user.telegramLinkedAt === null
-        ? null
-        : Math.floor(user.telegramLinkedAt.getTime() / 1000),
-    }
+    // Returned even when no chat is linked: the generation outlives the
+    // binding, so a token minted before an unlink stays void after a relink.
+    return user === null ? null : toIdentity(user)
   },
 
   async findByChatId(chatId) {
     const user = await prisma.user.findUnique({ where: { telegramChatId: chatId } })
 
-    if (user == null) return null
-
-    return {
-      userId: user.id,
-      chatId,
-      linkedAt: user.telegramLinkedAt === null
-        ? null
-        : Math.floor(user.telegramLinkedAt.getTime() / 1000),
-    }
+    return user === null ? null : toIdentity(user)
   },
 
-  async link(userId, chatId) {
+  async transition(userId, chatId, expected, next) {
+    // The comparison is part of the write. Validating in application code and
+    // then writing leaves a window in which a recovery can land and be
+    // silently overwritten — which is how a replacement token outlives the
+    // enrollment it proved.
     try {
-      const user = await prisma.user.update({
-        where: { id: userId },
-        data: { telegramChatId: chatId, telegramLinkedAt: new Date() },
+      const { count } = await prisma.user.updateMany({
+        where: {
+          id: userId,
+          ...(expected === ANY_GENERATION ? {} : { telegramEnrollment: expected }),
+        },
+        data: {
+          telegramChatId: chatId,
+          telegramLinkedAt: chatId === null ? null : new Date(),
+          telegramEnrollment: next,
+        },
       })
 
-      return {
-        userId,
-        chatId,
-        linkedAt: Math.floor(user.telegramLinkedAt!.getTime() / 1000),
+      if (count !== 1) {
+        return null // changed under us; nothing was written
       }
     } catch (error) {
       // P2002 is Prisma's unique-constraint violation. The @unique on
       // telegramChatId is what actually guarantees one chat per account: two
-      // concurrent links both pass an application check, and only one can pass
-      // the index.
+      // concurrent transitions both pass an application check, and only one can
+      // pass the index.
       if ((error as { code?: string }).code === 'P2002') {
         throw new ChatAlreadyLinked('That chat is already a second factor.')
       }
 
       throw error
     }
-  },
 
-  async unlink(userId) {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { telegramChatId: null, telegramLinkedAt: null },
-    })
+    return identities.findByUserId(userId)
   },
 }
 ```
@@ -122,9 +124,10 @@ The matching schema:
 
 ```prisma
 model User {
-  id               String    @id @default(cuid())
-  telegramChatId   String?   @unique      // the @unique is load-bearing
-  telegramLinkedAt DateTime?
+  id                 String    @id @default(cuid())
+  telegramChatId     String?   @unique      // the @unique is load-bearing
+  telegramLinkedAt   DateTime?
+  telegramEnrollment String?                // kept when unlinked, on purpose
 }
 ```
 
@@ -282,6 +285,11 @@ cooldown and the webhook claim a reservation exactly one caller can win.
 `RedisCodeStore` resolves its atomic primitive at construction and throws if the
 client offers neither, rather than silently racing under load.
 
+`IdentityStore` has one mutating method, `transition`, for a related reason: a
+`link`/`unlink` pair invites read-then-write, and the window between validating
+a replacement token and writing the binding is where that token outlives the
+enrollment it proved. Hand the store the generation you expect and let it decide.
+
 ## Requirements
 
 Node 18 or newer, for `fetch` and `AbortSignal.timeout`. Pass `fetchImpl` to
@@ -297,5 +305,8 @@ npm install
 npm test
 ```
 
-114 tests written clause by clause against the specification, including the
-cross-language fixtures in `/conformance` that the PHP package also reads.
+115 tests written clause by clause against the specification, including the
+cross-language fixtures in `/conformance` that the PHP package also reads, and
+the concurrency cases in `concurrency.test.ts` and `transition-race.test.ts` —
+each of which has been checked by removing the protection it covers and
+confirming it fails.

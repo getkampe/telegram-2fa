@@ -58,7 +58,11 @@ final class ConformanceTest extends TestCase
     public function test_a_challenge_record_written_elsewhere_verifies_here(): void
     {
         $record = $this->fixture['code_record'];
-        $this->identities->link($record['user_id'], '555000111');
+
+        // Seed the exact enrollment the fixture's challenge belongs to: a
+        // challenge from a superseded enrollment is refused, so interop depends
+        // on both implementations agreeing about this field too.
+        $this->identities->seed($record['user_id'], '555000111', $record['enrollment']);
 
         $this->store->put($record['key'], $record['value'], 300);
 
@@ -70,7 +74,7 @@ final class ConformanceTest extends TestCase
 
     public function test_the_key_layout_matches_the_specification(): void
     {
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
         $this->tfa->push('user-1', 'withdrawal');
 
         // The key the implementation chose must be the key the fixture names.
@@ -80,7 +84,7 @@ final class ConformanceTest extends TestCase
 
     public function test_a_challenge_record_written_here_matches_the_wire_format(): void
     {
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
         $this->tfa->push('user-1', 'withdrawal');
 
         $written = $this->store->get($this->fixture['code_record']['key']);
@@ -96,7 +100,7 @@ final class ConformanceTest extends TestCase
     public function test_an_on_demand_record_written_elsewhere_is_general_purpose(): void
     {
         $record = $this->fixture['on_demand_record'];
-        $this->identities->link($record['user_id'], '777000222');
+        $this->identities->seed($record['user_id'], '777000222', $record['enrollment']);
 
         $this->store->put($record['key'], $record['value'], 300);
 
@@ -131,7 +135,7 @@ final class ConformanceTest extends TestCase
 
     public function test_the_cooldown_record_is_a_bare_integer(): void
     {
-        $this->identities->link('user-1', '555000111');
+        $this->identities->seed('user-1', '555000111', 'gen-user-1');
         $this->tfa->push('user-1');
 
         $written = $this->store->get($this->fixture['cooldown_record']['key']);

@@ -36,7 +36,8 @@ whole class of deployment mistake, and costs ten lines.
 CodeStore       get(key) / put(key, value, ttl) / forget(key)
                 take(key)            -> atomic get-and-delete
                 add(key, value, ttl) -> atomic set-if-absent, reports success
-IdentityStore   find_by_user_id / find_by_chat_id / link / unlink
+IdentityStore   find_by_user_id / find_by_chat_id
+                transition(user_id, chat_id|null, expected_gen, next_gen)
 TelegramClient  send_message / answer_callback_query / get_me / set_webhook
 Clock           now() -> unix seconds
 ```
@@ -46,6 +47,16 @@ first three and build the rest on top of them: single use and the attempt budget
 are read-modify-write sequences, and get-check-delete loses both to a race
 (SPEC.md 5.1). Redis has `GETDEL` and `SET NX EX`; a SQL store has
 `DELETE ... RETURNING` and a unique insert.
+
+Check what your framework's cache helper actually does before trusting it.
+Laravel's `Cache::pull()` reads like an atomic take and is `get()` then
+`forget()` on every driver; this package shipped on it, with a comment claiming
+Redis made it atomic, and it never did.
+
+`IdentityStore` has one mutating method on purpose. A `link`/`unlink` pair
+invites read-then-write, and the window between a caller's validation and its
+write is where a replacement token outlives the enrollment it proved. Give the
+store the expectation and let it decide (SPEC.md 2.2).
 
 Keep them this small. Everything else — framework integration, ORMs, HTTP
 clients — lives in adapters outside the core, which is what makes the core
@@ -84,7 +95,7 @@ Verification is ten lines and is the most important ten lines in the port
 
 ---
 
-## The twelve places a port goes wrong
+## The fourteen places a port goes wrong
 
 These all produce an implementation that passes a manual test.
 
@@ -146,7 +157,21 @@ recovery is still honoured after it — handing whoever holds it the chat the us
 just recovered onto. A counter, a version column or a keyed digest of
 `chat_id|linked_at` all work.
 
-**12. Trusting your own field names.** Write `snake_case` exactly as SPEC.md
+**12. Deriving the enrollment generation from state.** A digest of
+`chat_id|linked_at` looks like a version and is not one: unlink and relink the
+same chat inside one second and it repeats, reviving every token minted
+beforehand. Use a counter or 128 random bits, change it on every transition, and
+keep it when the account is unlinked — revocation has to outlive the binding it
+revoked.
+
+**13. Clearing stale challenges instead of refusing them.** Deleting pending
+challenges when an enrollment changes races a verification that has already
+taken the record and is about to write it back, and that race cannot be closed
+from either side. Stamp each challenge with the generation and check it at
+acceptance. Then a resurrected record is inert, which is the property you can
+actually guarantee — do not claim the other one.
+
+**14. Trusting your own field names.** Write `snake_case` exactly as SPEC.md
 section 9 lists it, and check against `/conformance` rather than against your own
 output. The two reference implementations shipped with `expiresAt` and
 `expires_at` respectively, each agreed with itself, and neither could have read

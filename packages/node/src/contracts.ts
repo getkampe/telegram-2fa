@@ -5,13 +5,33 @@
  * of lines, rather than a framework to adopt.
  */
 
-/** A user-to-chat binding as the identity store holds it. */
+/**
+ * An account's Telegram enrollment, as the identity store holds it.
+ *
+ * This represents the row rather than only the linked state, so an account that
+ * has been unlinked still has an Identity - carrying no chat, but carrying the
+ * generation. That is deliberate: revocation has to outlive the binding it
+ * revokes, or a token minted before an unlink would come back to life when the
+ * user links again.
+ */
 export interface Identity {
   userId: string
-  chatId: string
+  /** The linked chat, or null when this account is not currently linked. */
+  chatId: string | null
   /** Unix seconds when the link was proven, or null when it was not. */
   linkedAt: number | null
+  /**
+   * Opaque enrollment generation, changed by every transition.
+   *
+   * Null only for a row that has never been enrolled. Anything holding
+   * authority over an enrollment records this value and is void once it
+   * differs.
+   */
+  generation: string | null
 }
+
+/** Expectation meaning "whatever is there now", for recovery paths. */
+export const ANY_GENERATION = '\u0000any'
 
 /**
  * Only a verified link counts as a second factor.
@@ -21,7 +41,7 @@ export interface Identity {
  * id into the record satisfy a challenge.
  */
 export function isVerified(identity: Identity | null | undefined): boolean {
-  return identity?.linkedAt != null
+  return identity?.chatId != null && identity?.linkedAt != null
 }
 
 /**
@@ -69,17 +89,48 @@ export interface CodeStore {
 }
 
 /**
- * Durable storage of the binding, usually three columns on your users table.
+ * Durable storage of the enrollment: which chat is an account's second factor,
+ * and which generation of that enrollment is current.
  *
- * See SPEC.md section 2: both directions must be unique, and the uniqueness of
- * chatId must be enforced by the database rather than only by application code.
+ * Two rules the implementation, not the caller, has to guarantee:
+ *
+ * 1. **Chat uniqueness, at the storage layer** - a unique index, not only an
+ *    application check, because two concurrent links both pass a check and only
+ *    one can pass an index.
+ * 2. **Transitions are conditional.** Every change goes through transition(),
+ *    which compares the stored generation and writes in one operation.
+ *    Read-then-write cannot express this: a recovery landing between a caller's
+ *    validation and its write would be silently overwritten, which is exactly
+ *    how a replacement token outlived the enrollment it proved.
  */
 export interface IdentityStore {
+  /**
+   * The enrollment for an account, or null when it has no row. May be unlinked;
+   * the generation must be returned even when no chat is linked.
+   */
   findByUserId(userId: string): Promise<Identity | null>
+
+  /** Must never match an account whose chat id is null. */
   findByChatId(chatId: string): Promise<Identity | null>
-  /** Must throw ChatAlreadyLinked rather than reassign a taken chat. */
-  link(userId: string, chatId: string): Promise<Identity>
-  unlink(userId: string): Promise<void>
+
+  /**
+   * Compare-and-set the enrollment.
+   *
+   * @param chatId   the chat to bind, or null to unlink
+   * @param expected the generation the caller believes is current; null means
+   *                 "none recorded yet"; ANY_GENERATION skips the check
+   * @param next     the generation to store, always fresh - including on an
+   *                 unlink, so authority over the old enrollment dies
+   * @returns the new state, or null when the expectation did not hold, in which
+   *          case the stored row must be left exactly as it was
+   * @throws ChatAlreadyLinked when the chat belongs to another account
+   */
+  transition(
+    userId: string,
+    chatId: string | null,
+    expected: string | null,
+    next: string,
+  ): Promise<Identity | null>
 }
 
 export interface InlineButton {

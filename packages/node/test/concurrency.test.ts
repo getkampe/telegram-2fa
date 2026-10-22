@@ -46,7 +46,7 @@ describe('concurrency', () => {
 
   it('does not let one code verify twice concurrently', async () => {
     const h = racingHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
     await h.tfa.push('user-1')
     const code = h.lastCode()
 
@@ -71,7 +71,7 @@ describe('concurrency', () => {
 
   it('does not lose a wrong guess to a concurrent one', async () => {
     const h = racingHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
     await h.tfa.push('user-1')
     const wrong = wrongCode(h.lastCode())
 
@@ -99,7 +99,7 @@ describe('concurrency', () => {
 
   it('sends one code for two concurrent challenges', async () => {
     const h = racingHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
 
     let second: Awaited<ReturnType<typeof h.tfa.push>> | null = null
 

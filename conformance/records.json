@@ -2,6 +2,10 @@
   "$comment": [
     "Cross-language conformance fixtures for SPEC.md section 9.",
     "",
+    "Schema 2 adds the enrollment generation and the challenge id: a challenge",
+    "belongs to one enrollment, and is refused once that enrollment is",
+    "superseded, which is how revocation outlives a binding.",
+    "",
     "Both the PHP and the Node test suites read this file, write these records",
     "into a store under these exact keys, and verify these codes through their",
     "own public API. A field name or hash construction that drifts in one",
@@ -12,7 +16,7 @@
     "with the pepper below. They are committed as literals on purpose: if both",
     "implementations recomputed them, a shared mistake would agree with itself."
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "config": {
     "key_prefix": "tg2fa",
     "hash_algorithm": "sha256",
@@ -23,11 +27,14 @@
     "key": "tg2fa:code:user-1",
     "user_id": "user-1",
     "plaintext_code": "314159",
+    "enrollment": "6f1c9a2b4d8e7f30a51c6b9d2e4f8a71",
     "value": {
       "hash": "913e4f3f255024e44b6025ee81a94351e3cad1a859f497826ef68787e07dd679",
       "expires_at": 1800000300,
       "attempts": 0,
-      "purpose": "withdrawal"
+      "purpose": "withdrawal",
+      "generation": "6f1c9a2b4d8e7f30a51c6b9d2e4f8a71",
+      "challenge_id": "9a3f51c7b2d84e60"
     }
   },
   "on_demand_record": {
@@ -35,11 +42,14 @@
     "key": "tg2fa:code:user-2",
     "user_id": "user-2",
     "plaintext_code": "271828",
+    "enrollment": "c4b7e1a93f26d85074b1c3a9e6f2d840",
     "value": {
       "hash": "fd52ea08fe1a9c7af612e825ac7d6c7bd70331e591c4defe4fe1e9f4d13548a6",
       "expires_at": 1800000300,
       "attempts": 0,
-      "purpose": "on_demand"
+      "purpose": "on_demand",
+      "generation": "c4b7e1a93f26d85074b1c3a9e6f2d840",
+      "challenge_id": "41d7b93ac25e8f60"
     }
   },
   "deeplink_record": {

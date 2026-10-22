@@ -32,10 +32,17 @@ const fixture = JSON.parse(
   code_record: {
     key: string
     user_id: string
+    enrollment: string
     plaintext_code: string
     value: Record<string, unknown>
   }
-  on_demand_record: { key: string; user_id: string; plaintext_code: string; value: unknown }
+  on_demand_record: {
+    key: string
+    user_id: string
+    enrollment: string
+    plaintext_code: string
+    value: unknown
+  }
   deeplink_record: { key: string; token: string; user_id: string; value: unknown }
   paste_record: { key: string; token: string; chat_id: string; value: unknown }
   cooldown_record: { key: string; value: number }
@@ -72,7 +79,11 @@ describe('cross-language conformance', () => {
   it('verifies a challenge record written by the other implementation', async () => {
     const h = conformanceHarness()
     const record = fixture.code_record
-    await h.identities.link(record.user_id, '555000111')
+
+    // Seed the exact enrollment the fixture's challenge belongs to: a challenge
+    // from a superseded enrollment is refused, so interop depends on both
+    // implementations agreeing about this field too.
+    await h.identities.seed(record.user_id, '555000111', record.enrollment)
 
     await h.store.put(record.key, record.value, 300)
 
@@ -85,7 +96,7 @@ describe('cross-language conformance', () => {
 
   it('writes a challenge record in the shared wire format', async () => {
     const h = conformanceHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
     await h.tfa.push('user-1', 'withdrawal')
 
     const written = (await h.store.get(fixture.code_record.key)) as Record<string, unknown>
@@ -100,7 +111,7 @@ describe('cross-language conformance', () => {
 
   it('uses the key layout the specification names', async () => {
     const h = conformanceHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
     await h.tfa.push('user-1', 'withdrawal')
 
     assert.notEqual(await h.store.get(fixture.code_record.key), null)
@@ -110,7 +121,7 @@ describe('cross-language conformance', () => {
   it('treats an on-demand record from elsewhere as general-purpose', async () => {
     const h = conformanceHarness()
     const record = fixture.on_demand_record
-    await h.identities.link(record.user_id, '777000222')
+    await h.identities.seed(record.user_id, '777000222', record.enrollment)
 
     await h.store.put(record.key, record.value, 300)
 
@@ -143,7 +154,7 @@ describe('cross-language conformance', () => {
 
   it('writes the cooldown as a bare integer', async () => {
     const h = conformanceHarness()
-    await h.identities.link('user-1', '555000111')
+    await h.identities.seed('user-1', '555000111', `gen-${'user-1'}`)
     await h.tfa.push('user-1')
 
     const written = await h.store.get(fixture.cooldown_record.key)

@@ -1,4 +1,5 @@
 import {
+  ANY_GENERATION,
   type Clock,
   type CodeStore,
   type Identity,
@@ -72,12 +73,12 @@ export class MemoryCodeStore implements CodeStore {
  * An in-memory identity store, for tests and for sketching an integration
  * before wiring it to a database.
  *
- * It models the rule a real store must enforce with a unique constraint: one
- * chat belongs to one user, and a second claim is refused rather than allowed
- * to overwrite the first.
+ * It models both rules a real store must enforce: one chat belongs to one
+ * account, and a transition only applies when the stored generation is the one
+ * the caller expected. Rows survive unlinking, because the generation has to.
  */
 export class MemoryIdentityStore implements IdentityStore {
-  private byUser = new Map<string, Identity>()
+  private rows = new Map<string, Identity>()
 
   private readonly clock: Clock
 
@@ -86,12 +87,12 @@ export class MemoryIdentityStore implements IdentityStore {
   }
 
   async findByUserId(userId: string): Promise<Identity | null> {
-    return this.byUser.get(userId) ?? null
+    return this.rows.get(userId) ?? null
   }
 
   async findByChatId(chatId: string): Promise<Identity | null> {
-    for (const identity of this.byUser.values()) {
-      if (identity.chatId === chatId) {
+    for (const identity of this.rows.values()) {
+      if (identity.chatId !== null && identity.chatId === chatId) {
         return identity
       }
     }
@@ -99,22 +100,54 @@ export class MemoryIdentityStore implements IdentityStore {
     return null
   }
 
-  async link(userId: string, chatId: string): Promise<Identity> {
-    const holder = await this.findByChatId(chatId)
+  async transition(
+    userId: string,
+    chatId: string | null,
+    expected: string | null,
+    next: string,
+  ): Promise<Identity | null> {
+    const current = this.rows.get(userId) ?? null
 
-    if (holder !== null && holder.userId !== userId) {
-      throw new ChatAlreadyLinked(
-        'That Telegram chat is already the second factor for another account.',
-      )
+    if (expected !== ANY_GENERATION && (current?.generation ?? null) !== expected) {
+      // The expectation failed, so the stored row is left exactly as it was.
+      // Returning null rather than throwing lets the caller decide whether this
+      // is a conflict or a stale token.
+      return null
     }
 
-    const identity: Identity = { userId, chatId, linkedAt: this.clock.now() }
-    this.byUser.set(userId, identity)
+    if (chatId !== null) {
+      const holder = await this.findByChatId(chatId)
+
+      if (holder !== null && holder.userId !== userId) {
+        throw new ChatAlreadyLinked(
+          'That Telegram chat is already the second factor for another account.',
+        )
+      }
+    }
+
+    const identity: Identity = {
+      userId,
+      chatId,
+      linkedAt: chatId === null ? null : this.clock.now(),
+      generation: next,
+    }
+
+    this.rows.set(userId, identity)
 
     return identity
   }
 
-  async unlink(userId: string): Promise<void> {
-    this.byUser.delete(userId)
+  /** Test helper: seed a verified enrollment without going through a flow. */
+  async seed(userId: string, chatId: string, generation: string): Promise<Identity> {
+    const identity: Identity = {
+      userId,
+      chatId,
+      linkedAt: this.clock.now(),
+      generation,
+    }
+
+    this.rows.set(userId, identity)
+
+    return identity
   }
 }
