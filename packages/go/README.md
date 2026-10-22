@@ -199,7 +199,7 @@ go test ./...
 CGO_ENABLED=1 go test -race ./...
 ```
 
-70 tests, standard library only. They include the cross-language fixtures in
+76 tests, standard library only. They include the cross-language fixtures in
 [`/conformance`](../../conformance/records.json), which the other three suites
 read too, so a field name drifting here fails theirs.
 

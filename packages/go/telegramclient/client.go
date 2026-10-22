@@ -4,9 +4,11 @@ package telegramclient
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +16,9 @@ import (
 )
 
 const base = "https://api.telegram.org/bot"
+
+// What replaces the bot token if it ever reaches a log line. See reason.
+const redacted = "[redacted]"
 
 // Client is the default Telegram client. Substitute your own implementation of
 // telegram2fa.TelegramClient to route through a queue or an existing bot
@@ -160,15 +165,42 @@ func (c *Client) DeleteWebhook() (bool, error) {
 	return err == nil, err
 }
 
+// reason turns an error from the transport into text that is safe to log.
+//
+// The bot token is in the request URL, because that is the API Telegram
+// exposes, and *url.Error embeds the URL it was given in its own message. So
+// the obvious err.Error() writes the token into the log line - and a token in a
+// log file is a bot that anyone who can read that file can impersonate: send
+// messages as it, re-point its webhook, read whatever is queued.
+//
+// Two steps rather than one. Unwrapping removes the URL at the source, which is
+// where nearly all of this comes from, and the replacement is a backstop for any
+// other error that might carry the token some way this does not anticipate.
+func (c *Client) reason(err error) string {
+	var urlErr *url.Error
+
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+
+	text := err.Error()
+
+	if c.botToken != "" {
+		text = strings.ReplaceAll(text, c.botToken, redacted)
+	}
+
+	return text
+}
+
 func (c *Client) call(method string, payload map[string]any) (any, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, &telegram2fa.RequestError{Method: method, Reason: err.Error()}
+		return nil, &telegram2fa.RequestError{Method: method, Reason: c.reason(err)}
 	}
 
 	request, err := http.NewRequest(http.MethodPost, base+c.botToken+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return nil, &telegram2fa.RequestError{Method: method, Reason: err.Error()}
+		return nil, &telegram2fa.RequestError{Method: method, Reason: c.reason(err)}
 	}
 
 	request.Header.Set("Content-Type", "application/json")
@@ -177,7 +209,7 @@ func (c *Client) call(method string, payload map[string]any) (any, error) {
 	if err != nil {
 		return nil, &telegram2fa.RequestError{
 			Method: method,
-			Reason: "Telegram could not be reached: " + err.Error(),
+			Reason: "Telegram could not be reached: " + c.reason(err),
 		}
 	}
 
@@ -185,7 +217,7 @@ func (c *Client) call(method string, payload map[string]any) (any, error) {
 
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return nil, &telegram2fa.RequestError{Method: method, Reason: err.Error()}
+		return nil, &telegram2fa.RequestError{Method: method, Reason: c.reason(err)}
 	}
 
 	var decoded struct {
