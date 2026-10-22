@@ -1,0 +1,32 @@
+# Dependencies
+/packages/php/vendor/
+/packages/node/node_modules/
+/examples/**/vendor/
+/examples/**/node_modules/
+
+# Build output
+/packages/node/dist/
+
+# Lock files for a library: applications pin, libraries do not
+/packages/php/composer.lock
+/packages/node/package-lock.json
+
+# Test and tooling caches
+/packages/php/.phpunit.cache/
+/packages/php/.phpunit.result.cache
+/packages/php/.php-cs-fixer.cache
+/packages/node/.tsbuildinfo
+*.tsbuildinfo
+coverage/
+
+# Secrets. The bot token and the webhook secret belong in the environment.
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

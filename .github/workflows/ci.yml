@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+    defaults:
+      run:
+        working-directory: packages/php
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, mbstring
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Lint every source file
+        run: find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Test
+        run: vendor/bin/phpunit
+
+  node:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+    defaults:
+      run:
+        working-directory: packages/node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # The protocol is only worth having if nothing leaks the thing it protects.
+  # This fails the build on the mistakes that are easiest to reintroduce.
+  secrets-hygiene:
+    name: No codes in logs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject logging a raw update body
+        run: |
+          if grep -rniE "log[^(]*\(.*(update|request)->all\(\)" \
+               --include='*.php' --include='*.ts' packages/*/src; then
+            echo "::error::A raw Telegram update must never be logged: it contains the codes."
+            exit 1
+          fi
+
+      - name: Reject logging a code
+        run: |
+          if grep -rniE "(log|console)[^(]*\([^)]*['\"]code['\"][[:space:]]*(=>|:)" \
+               --include='*.php' --include='*.ts' packages/*/src; then
+            echo "::error::A verification code must never be written to a log."
+            exit 1
+          fi
+
+      - name: Reject non-constant-time comparison of code material
+        run: |
+          if grep -rnE '[$](storedHash|storedCode|hash|code)[[:space:]]*={2,3}[[:space:]]*[$]' \
+               --include='*.php' packages/*/src; then
+            echo "::error::Compare code hashes with hash_equals, not == or ===."
+            exit 1
+          fi
+
+      - name: Reject predictable randomness
+        run: |
+          if grep -rnE '(mt_rand|[^_a-z]rand)[[:space:]]*\(|Math\.random[[:space:]]*\(' \
+               --include='*.php' --include='*.ts' packages/*/src; then
+            echo "::error::Use a CSPRNG: random_int, or node:crypto randomInt."
+            exit 1
+          fi

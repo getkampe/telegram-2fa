@@ -1,0 +1,51 @@
+{
+  "name": "@kampe/telegram-2fa",
+  "version": "1.0.0",
+  "description": "Telegram as a second authentication factor. Framework-agnostic, zero runtime dependencies.",
+  "keywords": [
+    "telegram",
+    "2fa",
+    "mfa",
+    "two-factor",
+    "authentication",
+    "otp",
+    "kampe"
+  ],
+  "homepage": "https://github.com/getkampe/telegram-2fa#readme",
+  "bugs": "https://github.com/getkampe/telegram-2fa/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getkampe/telegram-2fa.git",
+    "directory": "packages/node"
+  },
+  "license": "MIT",
+  "author": "Joseph Uruetse <support@getkampe.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
