@@ -16,7 +16,8 @@ Message [@BotFather](https://t.me/BotFather):
 ```
 
 It asks for a display name (anything) and a username (must end in `bot`). It then
-gives you a token that looks like `123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw`.
+gives you a token of the form `<digits>:<35 or so letters, digits, _ and ->`,
+for example `1111111111:AAFakeExampleTokenNotARealCredential`.
 
 **That token is a credential.** It can read every message sent to your bot and
 send messages as it. Treat it exactly like a database password: environment
@@ -68,7 +69,7 @@ with anything shorter.
 ## 3. Configure the application
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw
+TELEGRAM_BOT_TOKEN=1111111111:AAFakeExampleTokenNotARealCredential
 TELEGRAM_BOT_USERNAME=your_bot
 TELEGRAM_WEBHOOK_SECRET=<from step 2>
 TELEGRAM_2FA_HASH_PEPPER=<any long random string>

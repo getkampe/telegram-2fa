@@ -10,10 +10,16 @@ the protocol or reviewing an implementation, because it says *why* each rule in
 ## Reporting a vulnerability
 
 Open a [private security advisory](https://github.com/getkampe/telegram-2fa/security/advisories/new)
-on this repository. Please do not open a public issue for anything exploitable.
+on this repository, or e-mail **support@getkampe.com** if that form is not
+available to you. Please do not open a public issue for anything exploitable.
 
 Include the version or commit, which package, and the smallest reproduction you
 can manage. A first response should arrive within a few days.
+
+The e-mail address is listed as well as the form on purpose: private
+vulnerability reporting is a setting a repository can have switched off, and a
+reporter who meets a page they cannot use will often give up rather than hunt
+for another route — which is the worst outcome for everyone.
 
 ---
 
