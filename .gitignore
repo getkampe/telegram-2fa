@@ -30,3 +30,12 @@ coverage/
 *.swp
 .DS_Store
 Thumbs.db
+# Go
+packages/go/*.test
+/packages/go/dist/
+
+# Python (the port lives on its own branch; these appear whenever its tests run)
+__pycache__/
+*.py[cod]
+/packages/python/dist/
+/packages/python/*.egg-info/

@@ -2,11 +2,12 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP and Node.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node and Go.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.21-00add8)](packages/go)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Part of the [Kampe](https://getkampe.com) ecosystem.
@@ -27,8 +28,8 @@ authenticator app, and [SECURITY.md](SECURITY.md) is explicit about what this
 factor is and is not worth.
 
 This repository is that second factor done properly: **one protocol
-specification** and **two reference implementations** that interoperate with the
-same bot, the same storage layout and the same security properties.
+specification** and **three reference implementations** that interoperate with
+the same bot, the same storage layout and the same security properties.
 
 ```
 telegram-2fa/
@@ -36,6 +37,8 @@ telegram-2fa/
 ├── SECURITY.md          threat model, and the mistakes this design rules out
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
+├── packages/go/         .../packages/go           — Go 1.21+, stdlib only
+├── conformance/         fixtures every suite reads, so interop is tested
 ├── examples/            Laravel and Express wiring, end to end
 └── docs/                bot setup, flows, porting to other languages
 ```
@@ -259,10 +262,19 @@ The proposed next-version [Basic and Advanced setup design](docs/setup-modes.md)
 lets account owners choose their verification experience while keeping shared
 security requirements. It is a design proposal, not a feature of these packages yet.
 
-The protocol is at version 1.0 and both packages implement it in full. The test
-suites are written clause by clause against the specification and are its
-executable form — `composer test` in `packages/php`, `npm test` in
-`packages/node`.
+The protocol is at version 1.0 and every package implements it in full. The
+test suites are written clause by clause against the specification and are its
+executable form:
+
+| Package | Tests | Run it |
+| --- | --- | --- |
+| PHP | 152 (live Redis, real SQL) | `composer test` in `packages/php` |
+| Node | 135 | `npm test` in `packages/node` |
+| Go | 70 (`-race` clean) | `go test ./...` in `packages/go` |
+
+Each protection has been checked by removing it and confirming the matching
+test fails. The fixtures in [`conformance/`](conformance/records.json) are read
+by every suite, so a field name drifting in one fails the others.
 
 ## Licence
 
