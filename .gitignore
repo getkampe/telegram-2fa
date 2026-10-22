@@ -6,6 +6,8 @@
 
 # Build output
 /packages/node/dist/
+/packages/ruby/*.gem
+/packages/ruby/pkg/
 
 # Lock files for a library: applications pin, libraries do not
 /packages/php/composer.lock
