@@ -39,21 +39,21 @@ final class ChallengeTest extends TestCase
         $store = new class implements \Kampe\TelegramTwoFactor\Contracts\IdentityStore {
             public function findByUserId(string $userId): ?\Kampe\TelegramTwoFactor\Results\Identity
             {
-                return new \Kampe\TelegramTwoFactor\Results\Identity($userId, '999', null);
+                return new \Kampe\TelegramTwoFactor\Results\Identity($userId, '999', null, 'gen-1');
             }
 
             public function findByChatId(string $chatId): ?\Kampe\TelegramTwoFactor\Results\Identity
             {
-                return new \Kampe\TelegramTwoFactor\Results\Identity('user-1', $chatId, null);
+                return new \Kampe\TelegramTwoFactor\Results\Identity('user-1', $chatId, null, 'gen-1');
             }
 
-            public function link(string $userId, string $chatId): \Kampe\TelegramTwoFactor\Results\Identity
-            {
-                return new \Kampe\TelegramTwoFactor\Results\Identity($userId, $chatId, 1);
-            }
-
-            public function unlink(string $userId): void
-            {
+            public function transition(
+                string $userId,
+                ?string $chatId,
+                ?string $expected,
+                string $next,
+            ): ?\Kampe\TelegramTwoFactor\Results\Identity {
+                return new \Kampe\TelegramTwoFactor\Results\Identity($userId, $chatId, 1, $next);
             }
         };
 

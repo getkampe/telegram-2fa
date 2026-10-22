@@ -49,12 +49,21 @@ return [
     | Storage
     |--------------------------------------------------------------------------
     |
-    | Codes live in the cache. Use a driver that is shared between processes and
-    | survives a deploy: redis, memcached or database. On `array` the store is
-    | per-process and on `file` it is per-server, so a code issued by one
-    | request can be invisible to the next.
+    | Codes live in the cache. Use redis or memcached. Two requirements, and the
+    | second is not a preference:
     |
-    | null uses the application default.
+    | 1. Shared between processes and surviving a deploy. On `array` the store
+    |    is per-process and on `file` it is per-server, so a code issued by one
+    |    request can be invisible to the next.
+    | 2. Real atomic primitives. The package needs an atomic get-and-delete and
+    |    an atomic set-if-absent, because single use and the attempt budget are
+    |    read-modify-write sequences: without atomicity two simultaneous
+    |    verifications of one code can both succeed, and the five-attempt limit
+    |    can be beaten by racing it. Laravel's pull() is only atomic where the
+    |    driver's own primitive is, which rules out database, file and array.
+    |
+    | null uses the application default — check what that is before relying
+    | on it.
     |
     */
 
@@ -65,7 +74,28 @@ return [
     'columns' => [
         'chat_id' => 'telegram_chat_id',
         'linked_at' => 'telegram_linked_at',
+
+        // The enrollment generation. It changes on every transition and
+        // survives unlinking, so authority over a removed enrollment stays
+        // revoked even after the account links again.
+        'enrollment' => 'telegram_enrollment',
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Local cache stores
+    |--------------------------------------------------------------------------
+    |
+    | The package refuses the array and file cache stores, because neither is
+    | shared between the processes serving your requests: their data and their
+    | locks are local, so one worker cannot see a code another issued, and two
+    | workers can verify the same code.
+    |
+    | Set this to true only for tests or a single-process script.
+    |
+    */
+
+    'permit_local_cache_store' => false,
 
     // null uses the application default log channel.
     'log_channel' => env('TELEGRAM_2FA_LOG_CHANNEL'),

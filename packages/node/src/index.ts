@@ -57,6 +57,10 @@ export {
   type LinkResult,
   type TelegramTwoFactorOptions,
   type VerificationResult,
+  PURPOSE_LOGIN,
+  PURPOSE_ON_DEMAND,
+  PURPOSE_REPLACE,
+  PURPOSE_UNLINK,
   TelegramTwoFactor,
 } from './telegram-two-factor.js'
 

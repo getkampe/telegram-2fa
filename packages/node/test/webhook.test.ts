@@ -60,6 +60,38 @@ describe('webhook verifier', () => {
   })
 })
 
+describe('config validation of numbers', () => {
+  /**
+   * Every range check is a comparison, and a comparison against NaN is false -
+   * so NaN passes every bound below it. It arrives easily, from Number(undefined)
+   * or Number('5 minutes') in an environment-variable path.
+   */
+  it('rejects NaN where a number is required', () => {
+    assert.throws(() => makeConfig({ maxAttempts: Number.NaN }), ConfigurationError)
+    assert.throws(() => makeConfig({ codeTtl: Number.NaN }), ConfigurationError)
+    assert.throws(() => makeConfig({ cooldown: Number.NaN }), ConfigurationError)
+    assert.throws(() => makeConfig({ linkTtl: Number.NaN }), ConfigurationError)
+  })
+
+  it('rejects Infinity', () => {
+    assert.throws(() => makeConfig({ codeTtl: Number.POSITIVE_INFINITY }), ConfigurationError)
+    assert.throws(() => makeConfig({ cooldown: Number.NEGATIVE_INFINITY }), ConfigurationError)
+  })
+
+  it('rejects a fractional value', () => {
+    // It would reach Redis as an EX argument.
+    assert.throws(() => makeConfig({ codeTtl: 300.5 }), ConfigurationError)
+    assert.throws(() => makeConfig({ maxAttempts: 2.5 }), ConfigurationError)
+  })
+
+  it('still accepts the whole numbers in range', () => {
+    const config = makeConfig({ codeTtl: 120, cooldown: 60, maxAttempts: 3 })
+
+    assert.equal(config.codeTtl, 120)
+    assert.equal(config.maxAttempts, 3)
+  })
+})
+
 describe('config validation', () => {
   it('refuses a missing webhook secret', () => {
     assert.throws(() => makeConfig({ webhookSecret: '' }), ConfigurationError)
@@ -204,6 +236,27 @@ describe('update handler', () => {
     assert.match(h.lastCode(), /^\d{6}$/)
   })
 
+  it('answers /unlink with instructions, and does not unlink', async () => {
+    const h = harness()
+    await h.link()
+
+    await handlerFor(h).handle(message('/unlink'))
+
+    // The question deserves an answer, not the generic menu - but the bot must
+    // not perform the removal: whoever holds the phone could then strip the
+    // factor with no session and no password.
+    assert.match(h.telegram.lastMessage(), /cannot be done from the chat/)
+    assert.equal(await h.tfa.isLinked('user-1'), true)
+  })
+
+  it('tells an unlinked chat there is nothing to unlink', async () => {
+    const h = harness()
+
+    await handlerFor(h).handle(message('/unlink'))
+
+    assert.match(h.telegram.lastMessage(), /not linked/)
+  })
+
   it('replies to an unknown command', async () => {
     const h = harness()
     await handlerFor(h).handle(message('/nonsense'))
@@ -246,5 +299,44 @@ describe('update handler', () => {
 
     assert.equal(await handlerFor(h).handle({ update_id: 1 }), false)
     assert.equal(h.telegram.sent.length, 0)
+  })
+
+  /**
+   * An update marked done before its work succeeds is an update permanently
+   * lost: Telegram's retry arrives, sees the marker, and drops it as a
+   * duplicate. The claim is released on failure so the retry is processed.
+   */
+  it('releases its claim when handling throws, so a retry is processed', async () => {
+    const h = harness()
+    await h.link()
+
+    const handler = handlerFor(h).on('boom', () => {
+      throw new Error('downstream failure')
+    })
+
+    const update = message('/boom')
+
+    await assert.rejects(() => handler.handle(update), /downstream failure/)
+
+    // The retry must not be mistaken for a duplicate of the failed attempt.
+    let retried = false
+    const retryHandler = handlerFor(h).on('boom', () => {
+      retried = true
+    })
+
+    await retryHandler.handle(update)
+
+    assert.equal(retried, true, "Telegram's retry of a failed update must be processed")
+  })
+
+  it('still drops a duplicate of an update that succeeded', async () => {
+    const h = harness()
+    await h.link()
+    const handler = handlerFor(h)
+    const update = message('/code')
+
+    assert.equal(await handler.handle(update), true)
+    assert.equal(await handler.handle(update), false)
+    assert.equal(h.telegram.sent.length, 1)
   })
 })

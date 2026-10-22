@@ -49,13 +49,15 @@ final class TelegramTwoFactorServiceProvider extends ServiceProvider
         $this->app->singleton(CodeStore::class, fn ($app) => new CacheCodeStore(
             $app->make(CacheFactory::class)->store(
                 $app['config']->get('telegram-2fa.cache_store') ?: null
-            )
+            ),
+            permitLocalStore: (bool) $app['config']->get('telegram-2fa.permit_local_cache_store', false),
         ));
 
         $this->app->singleton(IdentityStore::class, fn ($app) => new EloquentIdentityStore(
             $app['config']->get('telegram-2fa.user_model'),
             $app['config']->get('telegram-2fa.columns.chat_id', 'telegram_chat_id'),
             $app['config']->get('telegram-2fa.columns.linked_at', 'telegram_linked_at'),
+            $app['config']->get('telegram-2fa.columns.enrollment', 'telegram_enrollment'),
         ));
 
         $this->app->singleton(TelegramClient::class, fn ($app) => new HttpTelegramClient(

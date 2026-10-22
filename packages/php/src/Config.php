@@ -32,8 +32,20 @@ final class Config
         public readonly int $linkTtl = 600,
         public readonly string $keyPrefix = 'tg2fa',
         public readonly string $hashAlgorithm = 'sha256',
-        /** Pepper for code hashes. See Codes\CodeHasher. */
+        /** HMAC key for code hashes. Required. See Codes\CodeHasher. */
         public readonly string $hashPepper = '',
+        /**
+         * Which purposes a code the user fetched with /code may satisfy.
+         *
+         * Null, the default, means any: an on-demand code is general-purpose
+         * because it cannot know what it is for and the user asked for it
+         * deliberately. Set an allowlist to narrow that — ['login'] keeps
+         * /code useful for signing in while forcing privileged steps to issue
+         * their own code, at the cost of needing a push path for unlinking.
+         *
+         * @var list<string>|null
+         */
+        public readonly ?array $onDemandSatisfies = null,
         /** Drop repeated update_ids. Telegram retries on timeout. */
         public readonly bool $dedupeUpdates = true,
         public readonly int $updateDedupeTtl = 3600,
@@ -110,6 +122,35 @@ final class Config
             throw new ConfigurationError(
                 sprintf('Unknown hash algorithm "%s".', $this->hashAlgorithm)
             );
+        }
+
+        // Required, not recommended. A six-digit code has a million possible
+        // values, so an unkeyed digest of one is reversed by a table anyone can
+        // build in seconds: without a key, hashing the codes protects nothing
+        // against someone who reads the store.
+        if (strlen($this->hashPepper) < 32) {
+            throw new ConfigurationError(
+                'hashPepper must be at least 32 characters. It is the HMAC key for code '
+                . 'hashes, and without it a dumped cache of six-digit code hashes is reversed '
+                . 'by a lookup table of a million entries. Generate one with '
+                . '(new CodeGenerator)->webhookSecret() and set TELEGRAM_2FA_HASH_PEPPER. '
+                . 'Keep it outside the cache it protects.'
+            );
+        }
+
+        if ($this->onDemandSatisfies !== null) {
+            if ($this->onDemandSatisfies === []) {
+                throw new ConfigurationError(
+                    'onDemandSatisfies must list at least one purpose, or be null for any. '
+                    . 'An empty list makes every code fetched with /code useless.'
+                );
+            }
+
+            foreach ($this->onDemandSatisfies as $purpose) {
+                if (! is_string($purpose) || $purpose === '') {
+                    throw new ConfigurationError('onDemandSatisfies must contain non-empty strings.');
+                }
+            }
         }
 
         if ($this->keyPrefix === '' || str_contains($this->keyPrefix, ':')) {

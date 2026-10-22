@@ -15,6 +15,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
 import rateLimit from 'express-rate-limit'
 import {
+  ANY_GENERATION,
   ChatAlreadyLinked,
   Config,
   DefaultMessages,
@@ -31,65 +32,89 @@ import {
 // ---------------------------------------------------------------- your data
 
 /**
- * The only adapter you have to write. Four methods over your own users table.
+ * The only adapter you have to write. Three methods over your own users table.
  *
- * This example keeps users in a Map; the real thing is four queries. The
- * uniqueness check in link() must be backed by a unique index on the chat id
- * column — two concurrent links both pass an application-level check and only
- * one can pass an index.
+ * This example keeps users in a Map; the real thing is three queries. Two
+ * things the store, not the caller, has to guarantee: the chat id is unique at
+ * the database level (two concurrent links both pass an application check and
+ * only one can pass an index), and transition() compares and writes in one
+ * operation.
  */
 class UserIdentityStore implements IdentityStore {
-  private users = new Map<string, { email: string; chatId: string | null; linkedAt: number | null }>(
-    [['user-1', { email: 'ada@example.com', chatId: null, linkedAt: null }]],
-  )
+  private users = new Map<
+    string,
+    { email: string; chatId: string | null; linkedAt: number | null; generation: string | null }
+  >([['user-1', { email: 'ada@example.com', chatId: null, linkedAt: null, generation: null }]])
 
   async findByUserId(userId: string): Promise<Identity | null> {
     const user = this.users.get(userId)
 
-    if (user?.chatId == null) {
+    if (user === undefined) {
       return null
     }
 
-    return { userId, chatId: user.chatId, linkedAt: user.linkedAt }
+    // Note the row is returned even when no chat is linked: the generation has
+    // to outlive the binding, or a token minted before an unlink would come
+    // back to life when the account links again.
+    return {
+      userId,
+      chatId: user.chatId,
+      linkedAt: user.linkedAt,
+      generation: user.generation,
+    }
   }
 
   async findByChatId(chatId: string): Promise<Identity | null> {
     for (const [userId, user] of this.users) {
-      if (user.chatId === chatId) {
-        return { userId, chatId, linkedAt: user.linkedAt }
+      if (user.chatId !== null && user.chatId === chatId) {
+        return { userId, chatId, linkedAt: user.linkedAt, generation: user.generation }
       }
     }
 
     return null
   }
 
-  async link(userId: string, chatId: string): Promise<Identity> {
-    const taken = await this.findByChatId(chatId)
-
-    if (taken !== null && taken.userId !== userId) {
-      // In a real store this is the unique-index violation, translated.
-      throw new ChatAlreadyLinked('That chat is already a second factor for another account.')
-    }
-
+  /**
+   * One conditional write. In SQL this is
+   *
+   *   UPDATE users SET chat_id = ?, linked_at = ?, generation = ?
+   *   WHERE id = ? AND generation <=> ?
+   *
+   * checked by the affected-row count. The comparison must live in the
+   * statement: validating the expectation in application code and then writing
+   * leaves a window in which a recovery can land and be overwritten.
+   */
+  async transition(
+    userId: string,
+    chatId: string | null,
+    expected: string | null,
+    next: string,
+  ): Promise<Identity | null> {
     const user = this.users.get(userId)
 
     if (user === undefined) {
-      throw new Error(`Unknown user ${userId}`)
+      return null
+    }
+
+    if (expected !== ANY_GENERATION && user.generation !== expected) {
+      // Changed under us. Write nothing.
+      return null
+    }
+
+    if (chatId !== null) {
+      const holder = await this.findByChatId(chatId)
+
+      if (holder !== null && holder.userId !== userId) {
+        // In a real store this is the unique-index violation, translated.
+        throw new ChatAlreadyLinked('That chat is already a second factor for another account.')
+      }
     }
 
     user.chatId = chatId
-    user.linkedAt = Math.floor(Date.now() / 1000)
+    user.linkedAt = chatId === null ? null : Math.floor(Date.now() / 1000)
+    user.generation = next
 
-    return { userId, chatId, linkedAt: user.linkedAt }
-  }
-
-  async unlink(userId: string): Promise<void> {
-    const user = this.users.get(userId)
-
-    if (user !== undefined) {
-      user.chatId = null
-      user.linkedAt = null
-    }
+    return { userId, chatId, linkedAt: user.linkedAt, generation: user.generation }
   }
 
   /** Used for the label in the link confirmation message. */
@@ -207,10 +232,14 @@ app.post('/auth/2fa/send', rateLimit({ windowMs: 60_000, limit: 5 }), async (req
 })
 
 app.post('/auth/2fa/verify', rateLimit({ windowMs: 60_000, limit: 10 }), async (req, res) => {
+  // The purpose must match what the code was issued for. Take it from the
+  // server-side context of the action being confirmed, never from the request
+  // body as it is here — a client that chooses its own purpose can ask for the
+  // one its code happens to carry.
   const result = await tfa.verify(
     currentUser(req),
     String(req.body.code ?? ''),
-    req.body.purpose === undefined ? undefined : String(req.body.purpose),
+    String(req.body.purpose ?? 'login'),
   )
 
   if (!result.ok) {
@@ -226,9 +255,35 @@ app.post('/auth/2fa/verify', rateLimit({ windowMs: 60_000, limit: 10 }), async (
 app.post('/settings/telegram/unlink', async (req, res) => {
   // Proof of the factor is required to remove it: unlinking from a session
   // alone is exactly the move an attacker with a stolen session makes.
+  //
+  // Send the user a code with push(userId, PURPOSE_UNLINK) first, or let them
+  // fetch one with /code — on-demand codes satisfy any purpose.
   const result = await tfa.unlink(currentUser(req), String(req.body.code ?? ''))
 
   res.status(result.ok ? 200 : 400).json(result)
+})
+
+// ------------------------------------------------------- moving to a new chat
+
+/**
+ * The user has a new Telegram account.
+ *
+ * Linking never silently moves a verified binding, so this costs a code from
+ * the chat being replaced. Issue it with push(userId, PURPOSE_REPLACE).
+ */
+app.post('/settings/telegram/replace', rateLimit({ windowMs: 60_000, limit: 5 }), async (req, res) => {
+  const result = await tfa.startChatReplacement(
+    currentUser(req),
+    String(req.body.code ?? ''),
+  )
+
+  if (!('token' in result)) {
+    return res.status(400).json(result)
+  }
+
+  // Show this the same way as a first-time link: a button, and a QR code for a
+  // user whose new Telegram is on another device.
+  res.json({ url: result.url, expiresAt: result.expiresAt })
 })
 
 app.listen(3000, () => {

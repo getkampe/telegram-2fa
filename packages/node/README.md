@@ -43,72 +43,79 @@ unlimited attempt budget, a code lifetime measured in days.
 `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_2FA_HASH_PEPPER` and the optional
 `TELEGRAM_2FA_CODE_TTL`, `_COOLDOWN`, `_MAX_ATTEMPTS`, `_APP_NAME`.
 
+`TELEGRAM_2FA_HASH_PEPPER` is required and must be at least 32 characters: it is
+the HMAC key for code hashes, and a six-digit code has only a million possible
+values, so an unkeyed digest of one is reversed by a table anyone can build in
+seconds.
+
 ### The identity store
 
-Four methods over your own users table. In Prisma:
+Three methods over your own users table. In Prisma:
 
 ```ts
-import { ChatAlreadyLinked, type Identity, type IdentityStore } from '@kampe/telegram-2fa'
+import { ANY_GENERATION, ChatAlreadyLinked, type Identity, type IdentityStore } from '@kampe/telegram-2fa'
+
+const toIdentity = (u: {
+  id: string
+  telegramChatId: string | null
+  telegramLinkedAt: Date | null
+  telegramEnrollment: string | null
+}): Identity => ({
+  userId: u.id,
+  chatId: u.telegramChatId,
+  linkedAt: u.telegramLinkedAt === null ? null : Math.floor(u.telegramLinkedAt.getTime() / 1000),
+  generation: u.telegramEnrollment,
+})
 
 const identities: IdentityStore = {
   async findByUserId(userId) {
     const user = await prisma.user.findUnique({ where: { id: userId } })
 
-    if (user?.telegramChatId == null) return null
-
-    return {
-      userId,
-      chatId: user.telegramChatId,
-      linkedAt: user.telegramLinkedAt === null
-        ? null
-        : Math.floor(user.telegramLinkedAt.getTime() / 1000),
-    }
+    // Returned even when no chat is linked: the generation outlives the
+    // binding, so a token minted before an unlink stays void after a relink.
+    return user === null ? null : toIdentity(user)
   },
 
   async findByChatId(chatId) {
     const user = await prisma.user.findUnique({ where: { telegramChatId: chatId } })
 
-    if (user == null) return null
-
-    return {
-      userId: user.id,
-      chatId,
-      linkedAt: user.telegramLinkedAt === null
-        ? null
-        : Math.floor(user.telegramLinkedAt.getTime() / 1000),
-    }
+    return user === null ? null : toIdentity(user)
   },
 
-  async link(userId, chatId) {
+  async transition(userId, chatId, expected, next) {
+    // The comparison is part of the write. Validating in application code and
+    // then writing leaves a window in which a recovery can land and be
+    // silently overwritten — which is how a replacement token outlives the
+    // enrollment it proved.
     try {
-      const user = await prisma.user.update({
-        where: { id: userId },
-        data: { telegramChatId: chatId, telegramLinkedAt: new Date() },
+      const { count } = await prisma.user.updateMany({
+        where: {
+          id: userId,
+          ...(expected === ANY_GENERATION ? {} : { telegramEnrollment: expected }),
+        },
+        data: {
+          telegramChatId: chatId,
+          telegramLinkedAt: chatId === null ? null : new Date(),
+          telegramEnrollment: next,
+        },
       })
 
-      return {
-        userId,
-        chatId,
-        linkedAt: Math.floor(user.telegramLinkedAt!.getTime() / 1000),
+      if (count !== 1) {
+        return null // changed under us; nothing was written
       }
     } catch (error) {
       // P2002 is Prisma's unique-constraint violation. The @unique on
       // telegramChatId is what actually guarantees one chat per account: two
-      // concurrent links both pass an application check, and only one can pass
-      // the index.
+      // concurrent transitions both pass an application check, and only one can
+      // pass the index.
       if ((error as { code?: string }).code === 'P2002') {
         throw new ChatAlreadyLinked('That chat is already a second factor.')
       }
 
       throw error
     }
-  },
 
-  async unlink(userId) {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { telegramChatId: null, telegramLinkedAt: null },
-    })
+    return identities.findByUserId(userId)
   },
 }
 ```
@@ -117,9 +124,10 @@ The matching schema:
 
 ```prisma
 model User {
-  id               String    @id @default(cuid())
-  telegramChatId   String?   @unique      // the @unique is load-bearing
-  telegramLinkedAt DateTime?
+  id                 String    @id @default(cuid())
+  telegramChatId     String?   @unique      // the @unique is load-bearing
+  telegramLinkedAt   DateTime?
+  telegramEnrollment String?                // kept when unlinked, on purpose
 }
 ```
 
@@ -173,17 +181,33 @@ Every method is async.
 | `completeDeepLink(token, chatId)` | Resolve a `/start` payload. Single use. |
 | `startPasteLink(chatId)` | Bot side: mint an 8-character code bound to the chat. |
 | `completePasteLink(userId, code)` | Authenticated page side. Rate-limit this. |
+| `startChatReplacement(userId, code)` | Move to a new Telegram account, proving the old one first. Narrow the result with `'token' in result`. |
 
 ### Challenge and verification
 
 | Method | Purpose |
 | --- | --- |
-| `push(userId, purpose?)` | Issue a code and send it. |
-| `pull(chatId)` | The user asked the bot for one. |
-| `verify(userId, code, purpose?)` | Check a code. |
+| `push(userId, purpose = 'login')` | Issue a code and send it. |
+| `pull(chatId)` | The user asked the bot for one; purpose `on_demand`. |
+| `verify(userId, code, purpose = 'login')` | Check a code. |
 
 Neither challenge method returns the code, so both results are safe to
 `JSON.stringify` into a response.
+
+`purpose` names the step a code authorises and is checked on every
+verification:
+
+```ts
+await tfa.push(user.id, 'withdrawal')
+// ...
+await tfa.verify(user.id, code, 'withdrawal')   // a login code will not pass
+```
+
+There is no "match anything" value, and the default is `login` on both sides
+rather than a wildcard. Exported constants: `PURPOSE_LOGIN`,
+`PURPOSE_ON_DEMAND`, `PURPOSE_REPLACE`, `PURPOSE_UNLINK`. A code the user
+fetched with `/code` carries `on_demand` and satisfies any purpose, which is
+what keeps `/code` usable for confirming an unlink.
 
 ### State and removal
 
@@ -191,7 +215,7 @@ Neither challenge method returns the code, so both results are safe to
 | --- | --- |
 | `isLinked(userId)` | Verified link present. |
 | `identity(userId)` / `identityForChat(chatId)` | The binding, either direction. |
-| `unlink(userId, code)` | Remove, with proof. |
+| `unlink(userId, code)` | Remove, with proof under purpose `unlink`. |
 | `unlinkAfterExternalProof(userId, reason)` | Remove, when another factor proved it. |
 
 `error` on a failed result is an `ErrorCode` — the protocol's shared strings
@@ -207,7 +231,7 @@ to show a user.
 | `TelegramTwoFactor` | The protocol. |
 | `Config` | Validated configuration, plus `fromEnv`. |
 | `MemoryCodeStore`, `MemoryIdentityStore` | In-process, for tests. |
-| `RedisCodeStore` | Works with node-redis and ioredis (`dialect` option). |
+| `RedisCodeStore` | Works with node-redis and ioredis (`dialect` option). Requires `GETDEL` or `EVAL`. |
 | `FetchTelegramClient` | Telegram over global `fetch`. |
 | `DefaultMessages`, `escapeHtml` | Bot copy, and the escaper to use if you write your own. |
 | `WebhookVerifier`, `SECRET_HEADER`, `TELEGRAM_RANGES` | Webhook authentication. |
@@ -247,10 +271,32 @@ fake captured — which is also a neat proof that it is not leaking anywhere els
 
 ---
 
+### Why `CodeStore` has five methods
+
+`take` and `add` are not a convenience. Single use and the attempt budget are
+read-modify-write sequences, so built from get-check-delete they race: two
+verifications arriving together both read the live record, both match, and both
+succeed, while the attempt counter loses increments to the same lost update.
+
+`take` is an atomic get-and-delete (Redis `GETDEL`, or `EVAL` on older servers);
+`add` is an atomic set-if-absent that reports whether it stored, which makes the
+cooldown and the webhook claim a reservation exactly one caller can win.
+
+`RedisCodeStore` resolves its atomic primitive at construction and throws if the
+client offers neither, rather than silently racing under load.
+
+`IdentityStore` has one mutating method, `transition`, for a related reason: a
+`link`/`unlink` pair invites read-then-write, and the window between validating
+a replacement token and writing the binding is where that token outlives the
+enrollment it proved. Hand the store the generation you expect and let it decide.
+
 ## Requirements
 
 Node 18 or newer, for `fetch` and `AbortSignal.timeout`. Pass `fetchImpl` to
 `FetchTelegramClient` to supply your own.
+
+A store with atomic get-and-delete and set-if-absent. Redis 6.2+ has `GETDEL`;
+older servers are handled through `EVAL`.
 
 ## Tests
 
@@ -259,4 +305,18 @@ npm install
 npm test
 ```
 
-65 tests written clause by clause against the specification.
+135 tests written clause by clause against the specification, including the
+cross-language fixtures in `/conformance` that the PHP package also reads, and
+three kinds of concurrency test:
+
+- `memory-store.test.ts` — `Promise.all` against the **shipped** stores, with no
+  wrapper. This is the one that matters: the earlier suite tested races only
+  through a test double that opened the window by hand, which proved the core
+  coped when a race happened and nothing about whether the store prevented one.
+  It did not.
+- `concurrency.test.ts` — the core's handling of an interleaving, through that
+  double
+- `transition-race.test.ts` — enrollment transitions against recovery
+
+Each protection has been checked by removing it and confirming the matching test
+fails.

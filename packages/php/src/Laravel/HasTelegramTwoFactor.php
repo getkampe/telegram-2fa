@@ -51,10 +51,28 @@ trait HasTelegramTwoFactor
 
     /**
      * Check a code this user submitted.
+     *
+     * $purpose must match what the code was issued for and defaults to login,
+     * the same as sendTelegramCode(). Pass the action's own name for anything
+     * privileged, so that a sign-in code cannot approve it.
      */
-    public function verifyTelegramCode(string $code, ?string $purpose = null): VerificationResult
-    {
+    public function verifyTelegramCode(
+        string $code,
+        string $purpose = TelegramTwoFactor::PURPOSE_LOGIN,
+    ): VerificationResult {
         return $this->telegramTwoFactor()->verify((string) $this->getKey(), $code, $purpose);
+    }
+
+    /**
+     * Move the factor to a different Telegram account.
+     *
+     * Costs a code from the chat being replaced, issued under the `replace`
+     * purpose. Returns a LinkRequest to show the user, or the verification
+     * failure that stopped it.
+     */
+    public function replaceTelegramChat(string $code): LinkRequest|VerificationResult
+    {
+        return $this->telegramTwoFactor()->startChatReplacement((string) $this->getKey(), $code);
     }
 
     /**

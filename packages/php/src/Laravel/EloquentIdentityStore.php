@@ -4,17 +4,18 @@ declare(strict_types=1);
 
 namespace Kampe\TelegramTwoFactor\Laravel;
 
-use Illuminate\Database\QueryException;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
+use Illuminate\Database\QueryException;
 use Kampe\TelegramTwoFactor\Contracts\IdentityStore;
 use Kampe\TelegramTwoFactor\Exceptions\ChatAlreadyLinked;
 use Kampe\TelegramTwoFactor\Results\Identity;
 
 /**
- * Stores the binding on an Eloquent model, by default your User.
+ * Stores the enrollment on an Eloquent model, by default your User.
  *
- * Three columns, added by the package migration:
- * telegram_chat_id, telegram_linked_at, telegram_unlinked_at.
+ * Four columns, added by the package migration: telegram_chat_id,
+ * telegram_linked_at, telegram_enrollment, and a unique index on the chat id.
  */
 final class EloquentIdentityStore implements IdentityStore
 {
@@ -25,6 +26,7 @@ final class EloquentIdentityStore implements IdentityStore
         private readonly string $model,
         private readonly string $chatIdColumn = 'telegram_chat_id',
         private readonly string $linkedAtColumn = 'telegram_linked_at',
+        private readonly string $generationColumn = 'telegram_enrollment',
     ) {
     }
 
@@ -37,25 +39,50 @@ final class EloquentIdentityStore implements IdentityStore
 
     public function findByChatId(string $chatId): ?Identity
     {
-        $row = $this->model::query()->where($this->chatIdColumn, $chatId)->first();
+        $row = $this->model::query()
+            ->whereNotNull($this->chatIdColumn)
+            ->where($this->chatIdColumn, $chatId)
+            ->first();
 
         return $row === null ? null : $this->toIdentity($row);
     }
 
-    public function link(string $userId, string $chatId): Identity
-    {
-        $row = $this->model::query()->findOrFail($userId);
+    public function transition(
+        string $userId,
+        ?string $chatId,
+        ?string $expected,
+        string $next,
+    ): ?Identity {
+        $query = $this->model::query()->whereKey($userId);
 
-        $row->setAttribute($this->chatIdColumn, $chatId);
-        $row->setAttribute($this->linkedAtColumn, now());
+        // The comparison lives in the WHERE clause, so the database decides
+        // whether this transition applies. Reading the generation in PHP and
+        // then writing would leave a window in which a recovery could land and
+        // be silently overwritten.
+        if ($expected !== self::ANY_GENERATION) {
+            $query->where(function ($q) use ($expected): void {
+                $expected === null
+                    ? $q->whereNull($this->generationColumn)
+                    : $q->where($this->generationColumn, $expected);
+            });
+        }
 
         try {
-            $row->save();
+            $affected = $query->update([
+                $this->chatIdColumn => $chatId,
+                // Carbon::now(), not the global now() helper: that helper only
+                // exists once illuminate/support's helpers file has been
+                // autoloaded, which a full framework boot does and a package
+                // consumed outside one does not. Calling it made this a fatal
+                // error rather than a write.
+                $this->linkedAtColumn => $chatId === null ? null : Carbon::now(),
+                $this->generationColumn => $next,
+            ]);
         } catch (QueryException $e) {
-            // The unique index on telegram_chat_id is what actually guarantees
-            // one chat per account. The application-level check in the core
-            // runs first, but two concurrent links of the same chat both pass
-            // it and only one can pass this.
+            // The unique index on the chat id column is what actually
+            // guarantees one chat per account. The application-level check runs
+            // first, but two concurrent transitions onto one chat both pass it
+            // and only one can pass the index.
             if ($this->isUniqueViolation($e)) {
                 throw new ChatAlreadyLinked(
                     'That Telegram chat is already the second factor for another account.',
@@ -67,36 +94,26 @@ final class EloquentIdentityStore implements IdentityStore
             throw $e;
         }
 
-        return $this->toIdentity($row);
-    }
-
-    public function unlink(string $userId): void
-    {
-        $row = $this->model::query()->find($userId);
-
-        if ($row === null) {
-            return;
-        }
-
-        $row->setAttribute($this->chatIdColumn, null);
-        $row->setAttribute($this->linkedAtColumn, null);
-        $row->save();
-    }
-
-    private function toIdentity(Model $row): ?Identity
-    {
-        $chatId = $row->getAttribute($this->chatIdColumn);
-
-        if ($chatId === null || $chatId === '') {
+        if ($affected !== 1) {
+            // Either the row is gone or its generation is not what the caller
+            // expected. Nothing was written.
             return null;
         }
 
+        return $this->findByUserId($userId);
+    }
+
+    private function toIdentity(Model $row): Identity
+    {
+        $chatId = $row->getAttribute($this->chatIdColumn);
         $linkedAt = $row->getAttribute($this->linkedAtColumn);
+        $generation = $row->getAttribute($this->generationColumn);
 
         return new Identity(
             (string) $row->getKey(),
-            (string) $chatId,
+            $chatId === null || $chatId === '' ? null : (string) $chatId,
             $linkedAt === null ? null : (int) strtotime((string) $linkedAt),
+            $generation === null || $generation === '' ? null : (string) $generation,
         );
     }
 

@@ -85,6 +85,18 @@ export class DefaultMessages implements Messages {
     )
   }
 
+  unlinkInstructions(appName: string): string {
+    return (
+      '🔓 <b>Removing Telegram as your second factor</b>\n\n' +
+      'For your security this cannot be done from the chat — anyone holding your phone ' +
+      'could do it.\n\n' +
+      `1. Sign in to ${escapeHtml(appName)} and open your security settings\n` +
+      '2. Choose to remove Telegram\n' +
+      '3. Send /code here and enter that code to confirm\n\n' +
+      'Lost access to this account instead? Contact support — they can verify you another way.'
+    )
+  }
+
   unlinked(appName: string): string {
     return (
       '🔓 <b>No longer your second factor</b>\n\n' +

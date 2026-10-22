@@ -6,6 +6,7 @@ namespace Kampe\TelegramTwoFactor\Tests;
 
 use Kampe\TelegramTwoFactor\Codes\CodeGenerator;
 use Kampe\TelegramTwoFactor\ErrorCode;
+use Kampe\TelegramTwoFactor\TelegramTwoFactor;
 
 /**
  * SPEC.md sections 2 and 3.
@@ -65,11 +66,15 @@ final class LinkingTest extends TestCase
     {
         $request = $this->tfa->startDeepLink('user-1');
 
-        // The key is derived from the hash, so the raw token must not be a key.
+        // The key is derived from a keyed hash of the token, so the raw token
+        // must not be a key — a store dump would otherwise hand over live link
+        // tokens directly.
         $this->assertNull($this->store->get($this->config->key('link', $request->token)));
-        $this->assertNotNull($this->store->get(
-            $this->config->key('link', hash_hmac('sha256', $request->token, ''))
-        ));
+
+        // And the token still resolves, so it is the derivation that differs
+        // rather than the record being missing.
+        $this->assertSame(1, $this->store->count());
+        $this->assertTrue($this->tfa->completeDeepLink($request->token, '555000111')->ok);
     }
 
     public function test_the_paste_flow_links_the_account(): void
@@ -152,7 +157,7 @@ final class LinkingTest extends TestCase
     public function test_unlinking_requires_a_valid_code(): void
     {
         $this->linked();
-        $this->tfa->push('user-1');
+        $this->tfa->push('user-1', TelegramTwoFactor::PURPOSE_UNLINK);
 
         $wrong = $this->tfa->unlink('user-1', '000000' === $this->lastCode() ? '111111' : '000000');
         $this->assertFalse($wrong->ok);
@@ -162,7 +167,10 @@ final class LinkingTest extends TestCase
     public function test_unlinking_with_a_valid_code_removes_the_factor(): void
     {
         $this->linked();
-        $this->tfa->push('user-1');
+
+        // Pushed under the unlink purpose: a code issued to confirm a sign-in
+        // must not be able to remove the factor. See PurposeTest.
+        $this->tfa->push('user-1', TelegramTwoFactor::PURPOSE_UNLINK);
 
         $result = $this->tfa->unlink('user-1', $this->lastCode());
 
@@ -173,7 +181,7 @@ final class LinkingTest extends TestCase
     public function test_unlinking_notifies_the_chat(): void
     {
         $this->linked();
-        $this->tfa->push('user-1');
+        $this->tfa->push('user-1', TelegramTwoFactor::PURPOSE_UNLINK);
 
         // Read the code before clearing the outbox, so that what remains after
         // the unlink is only the notice itself.
@@ -189,7 +197,7 @@ final class LinkingTest extends TestCase
     public function test_unlinking_clears_any_code_in_flight(): void
     {
         $this->linked();
-        $this->tfa->push('user-1');
+        $this->tfa->push('user-1', TelegramTwoFactor::PURPOSE_UNLINK);
         $this->tfa->unlink('user-1', $this->lastCode());
 
         $this->assertNull($this->store->get($this->config->key('code', 'user-1')));

@@ -9,8 +9,31 @@ export class FakeTelegramClient implements TelegramClient {
   answeredCallbacks: string[] = []
   shouldFailSending = false
 
+  private duringNextFailure: (() => Promise<void>) | null = null
+
+  /**
+   * Fail the next send, running `during` while it is "in flight".
+   *
+   * Models a send that blocks long enough for the world to move on - the
+   * cooldown lapsing and another challenge being issued - before the failure is
+   * reported and its cleanup runs.
+   */
+  failNextSend(during: () => Promise<void>): void {
+    this.shouldFailSending = true
+    this.duringNextFailure = during
+  }
+
   async sendMessage(chatId: string, text: string, _keyboard?: InlineButton[][]): Promise<boolean> {
     if (this.shouldFailSending) {
+      if (this.duringNextFailure !== null) {
+        // One-shot: the hook models a single slow, failing send, and the sends
+        // it triggers must succeed.
+        const during = this.duringNextFailure
+        this.duringNextFailure = null
+        this.shouldFailSending = false
+        await during()
+      }
+
       return false
     }
 
@@ -53,6 +76,7 @@ export function makeConfig(overrides: Partial<ConfigInput> = {}): Config {
     webhookSecret: 's'.repeat(48),
     botUsername: 'kampe_test_bot',
     appName: 'Kampe',
+    hashPepper: 'p'.repeat(48),
     ...overrides,
   })
 }
@@ -102,7 +126,7 @@ export function harness(overrides: Partial<ConfigInput> = {}): Harness {
     // library deliberately never returns it.
     lastCode: () => /<code>([^<]+)<\/code>/.exec(telegram.lastMessage())?.[1] ?? '',
     link: async (userId = 'user-1', chatId = '555000111') => {
-      await identities.link(userId, chatId)
+      await identities.seed(userId, chatId, `gen-${userId}`)
     },
   }
 }

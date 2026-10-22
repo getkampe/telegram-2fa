@@ -24,13 +24,30 @@ jobs:
     defaults:
       run:
         working-directory: packages/php
+
+    # A real Redis, because the adapter's central claim — that one code is
+    # consumed once across processes — rests on a lock being shared between
+    # them, and an in-process lock trivially is not. The integration suite
+    # skips itself when REDIS_HOST is unset, so this service is what keeps it
+    # from being permanently skipped.
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, mbstring
+          extensions: curl, mbstring, redis, pdo_sqlite
           coverage: none
           tools: composer:v2
 
@@ -41,7 +58,25 @@ jobs:
         run: find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
 
       - name: Test
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_DB: 15
         run: vendor/bin/phpunit
+
+      - name: Fail if the live-store integration suite was skipped
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_DB: 15
+        run: |
+          # A guarantee that rests on a skipped test is not a guarantee. If
+          # this suite stops running, that must break the build rather than
+          # pass quietly.
+          if vendor/bin/phpunit --filter RedisCacheCodeStoreTest --no-coverage | grep -qiE 'skipped|no tests'; then
+            echo "::error::The live Redis integration suite did not run."
+            exit 1
+          fi
 
   node:
     name: Node ${{ matrix.node }}

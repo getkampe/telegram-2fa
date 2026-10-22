@@ -16,9 +16,36 @@ final class FakeTelegramClient implements TelegramClient
 
     public bool $shouldFailSending = false;
 
+    /** @var callable():void|null */
+    private $duringNextFailure = null;
+
+    /**
+     * Fail the next send, running $during while it is "in flight".
+     *
+     * Models a send that blocks long enough for the world to move on — the
+     * cooldown lapsing and another challenge being issued — before the failure
+     * is reported and its cleanup runs.
+     *
+     * @param  callable():void  $during
+     */
+    public function failNextSend(callable $during): void
+    {
+        $this->shouldFailSending = true;
+        $this->duringNextFailure = $during;
+    }
+
     public function sendMessage(string $chatId, string $text, ?array $inlineKeyboard = null): bool
     {
         if ($this->shouldFailSending) {
+            if ($this->duringNextFailure !== null) {
+                // One-shot: the hook models a single slow, failing send, and
+                // the sends it triggers must succeed.
+                $during = $this->duringNextFailure;
+                $this->duringNextFailure = null;
+                $this->shouldFailSending = false;
+                $during();
+            }
+
             return false;
         }
 
@@ -54,6 +81,13 @@ final class FakeTelegramClient implements TelegramClient
         $last = end($this->sent);
 
         return $last === false ? null : $last['text'];
+    }
+
+    public function lastSentTo(): ?string
+    {
+        $last = end($this->sent);
+
+        return $last === false ? null : $last['chat_id'];
     }
 
     public function messageCount(): int
