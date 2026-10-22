@@ -149,6 +149,7 @@ export class UpdateHandler {
       case 'link':
         return this.link(chatId)
       case 'unlink':
+        return this.unlinkHint(chatId)
       case 'help':
         return this.help(chatId)
       default:
@@ -240,12 +241,27 @@ export class UpdateHandler {
   }
 
   /**
-   * /help, and /unlink.
+   * /unlink — explains where to do it, and does not do it.
    *
-   * Unlinking is not done from the chat: whoever holds the phone can already
-   * read the codes, and letting them also remove the factor with no session and
-   * no password turns a stolen phone into a permanently weakened account.
+   * Whoever holds the phone can already read the codes; letting them also
+   * remove the factor with no session and no password turns a stolen phone into
+   * a permanently single-factor account.
    */
+  private async unlinkHint(chatId: string): Promise<boolean> {
+    if (!isVerified(await this.tfa.identityForChat(chatId))) {
+      await this.telegram.sendMessage(chatId, this.messages.notLinked(this.config.appName))
+
+      return false
+    }
+
+    await this.telegram.sendMessage(
+      chatId,
+      this.messages.unlinkInstructions(this.config.appName),
+    )
+
+    return true
+  }
+
   private async help(chatId: string): Promise<boolean> {
     const linked = isVerified(await this.tfa.identityForChat(chatId))
 

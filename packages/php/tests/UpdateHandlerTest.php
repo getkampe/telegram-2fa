@@ -113,6 +113,29 @@ final class UpdateHandlerTest extends TestCase
         $this->assertMatchesRegularExpression('/^\d{6}$/', $this->lastCode());
     }
 
+    public function test_unlink_answers_with_instructions_and_does_not_unlink(): void
+    {
+        $this->linked();
+
+        $this->handler->handle($this->message('/unlink'));
+
+        // The question deserves an answer, not the generic menu — but the bot
+        // must not perform the removal: whoever holds the phone could then
+        // strip the factor with no session and no password.
+        $this->assertStringContainsString(
+            'cannot be done from the chat',
+            $this->telegram->lastMessage() ?? ''
+        );
+        $this->assertTrue($this->tfa->isLinked('user-1'));
+    }
+
+    public function test_unlink_in_an_unlinked_chat_says_there_is_nothing_to_remove(): void
+    {
+        $this->handler->handle($this->message('/unlink'));
+
+        $this->assertStringContainsString('not linked', $this->telegram->lastMessage() ?? '');
+    }
+
     public function test_an_unknown_command_gets_a_reply(): void
     {
         $this->handler->handle($this->message('/nonsense'));

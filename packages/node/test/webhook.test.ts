@@ -204,6 +204,27 @@ describe('update handler', () => {
     assert.match(h.lastCode(), /^\d{6}$/)
   })
 
+  it('answers /unlink with instructions, and does not unlink', async () => {
+    const h = harness()
+    await h.link()
+
+    await handlerFor(h).handle(message('/unlink'))
+
+    // The question deserves an answer, not the generic menu - but the bot must
+    // not perform the removal: whoever holds the phone could then strip the
+    // factor with no session and no password.
+    assert.match(h.telegram.lastMessage(), /cannot be done from the chat/)
+    assert.equal(await h.tfa.isLinked('user-1'), true)
+  })
+
+  it('tells an unlinked chat there is nothing to unlink', async () => {
+    const h = harness()
+
+    await handlerFor(h).handle(message('/unlink'))
+
+    assert.match(h.telegram.lastMessage(), /not linked/)
+  })
+
   it('replies to an unknown command', async () => {
     const h = harness()
     await handlerFor(h).handle(message('/nonsense'))

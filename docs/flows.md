@@ -77,6 +77,41 @@ See [SECURITY.md T5](../SECURITY.md#t5--a-link-token-redirected-to-the-wrong-cha
 
 ---
 
+## Linking — replacing a chat
+
+The user has a new Telegram account. Linking never silently moves a verified
+binding — a flow that did would let anyone holding a session attach their own
+chat — so replacement is explicit and costs a code from the chat being replaced.
+
+```
+App                                        User / old chat        New chat
+ │                                               │                   │
+ ├─ push(userId, 'replace') ───────────────────►  │                   │
+ │                                               │                   │
+ ├─ startChatReplacement(userId, code)            │                   │
+ │    verify under purpose 'replace'              │                   │
+ │    mint token {userId, replace: true}          │                   │
+ │                                                │                   │
+ ├─ t.me/bot?start=<token> ─────────────────────────────────────────► │
+ │                                                │   /start <token>  │
+ │◄───────────────────────────────────────────────────── webhook ──── ┤
+ │    completeDeepLink → bind(replace: true)                          │
+ │      notify old chat, unlink old, bind new                         │
+```
+
+Two properties worth preserving if you reimplement this:
+
+- **The `replace` mark lives on the stored token**, not on the call that resolves
+  it. Taking it from the resolution side makes the proof step skippable by
+  presenting an ordinary token.
+- **The old chat stays linked until the new one is resolved.** Authorising a
+  replacement the user never finishes must not leave the account factorless.
+
+A user who has lost the old chat entirely cannot complete step one, and belongs
+in the recovery path below.
+
+---
+
 ## Challenge — push
 
 Your application needs proof, now: a login, a withdrawal, an email change.
@@ -131,13 +166,13 @@ fails ([SPEC.md section 4](../SPEC.md#4-challenge)).
 ## Verification
 
 ```
-verify(userId, code, purpose?)
+verify(userId, code, purpose = 'login')
   │
   ├─ get code:<userId>
   │    └─ absent                        →  expired
   ├─ attempts >= 5                      →  too_many_attempts, forget key
   ├─ now > expires_at                   →  expired, forget key
-  ├─ purpose given and does not match   →  spend an attempt
+  ├─ purpose not satisfied              →  spend an attempt, report invalid
   ├─ hash_equals(stored, h(code))?
   │    ├─ no   →  attempts++, re-store with (expires_at - now) TTL
   │    │           └─ budget spent  →  too_many_attempts, forget key
@@ -149,18 +184,48 @@ Three properties to preserve in any reimplementation: single use on success, the
 attempt budget destroying the code, and the re-store **not** extending the code's
 lifetime.
 
+### Purpose
+
+`purpose` names the step a code authorises. It defaults to `login` on both
+`push` and `verify`, and **cannot be skipped** — there is no "match anything"
+value, because a default of "compare against nothing" means the binding does
+nothing unless every call site opts in, and the call site that forgets is both
+invisible and the one that matters.
+
+| Code issued by | Stored purpose | Satisfies |
+| --- | --- | --- |
+| `push(userId)` | `login` | `login` only |
+| `push(userId, 'withdrawal')` | `withdrawal` | `withdrawal` only |
+| `pull(chatId)` — the user sent `/code` | `on_demand` | **any** purpose |
+| `push(userId, 'replace')` | `replace` | `replace` only |
+| `push(userId, 'unlink')` | `unlink` | `unlink` only |
+
+`on_demand` is the one general-purpose code, and it is sound because the user
+asked for it deliberately: nothing the application did caused it to exist. It is
+also what keeps `/code` useful for confirming an unlink or a replacement.
+
+A purpose mismatch returns `invalid` and spends an attempt. It does not get its
+own error code — telling a caller that a live code exists for a different step is
+information it has not proved it should have — and it is budgeted so the mismatch
+path is not a free oracle.
+
 ---
 
 ## Unlinking
 
 ```
 unlink(userId, code)
-  ├─ not linked                 →  not_linked
-  ├─ verify(userId, code)       →  propagate any failure
+  ├─ not linked                        →  not_linked
+  ├─ verify(userId, code, 'unlink')    →  propagate any failure
   ├─ identities.unlink(userId)
   ├─ forget code: and cooldown:
   └─ notify the chat
 ```
+
+Verification is under purpose `unlink`, so a code pushed to confirm a sign-in
+cannot remove the factor. A code the user fetched with `/code` still works,
+because `on_demand` is general-purpose — which is what the bot's `/unlink`
+instructions tell them to do.
 
 Proof of the factor is required to remove it. For a user who lost the Telegram
 account, `unlinkAfterExternalProof(userId, reason)` skips the check and records
@@ -176,7 +241,7 @@ is how the user finds out.
 
 | Key | Written by | Read by | Cleared by |
 | --- | --- | --- | --- |
-| `link:<h(token)>` | `startDeepLink`, `startPasteLink` | the matching complete | first resolution, or TTL |
+| `link:<h(token)>` | `startDeepLink`, `startPasteLink`, `startChatReplacement` | the matching complete | first resolution, or TTL |
 | `code:<userId>` | `push`, `pull` | `verify` | success, budget spent, expiry, unlink |
 | `cooldown:<userId>` | `push`, `pull` | `push`, `pull` | TTL, delivery failure, unlink |
 | `update:<updateId>` | the update handler | the update handler | TTL |

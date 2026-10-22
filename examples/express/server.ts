@@ -207,10 +207,14 @@ app.post('/auth/2fa/send', rateLimit({ windowMs: 60_000, limit: 5 }), async (req
 })
 
 app.post('/auth/2fa/verify', rateLimit({ windowMs: 60_000, limit: 10 }), async (req, res) => {
+  // The purpose must match what the code was issued for. Take it from the
+  // server-side context of the action being confirmed, never from the request
+  // body as it is here — a client that chooses its own purpose can ask for the
+  // one its code happens to carry.
   const result = await tfa.verify(
     currentUser(req),
     String(req.body.code ?? ''),
-    req.body.purpose === undefined ? undefined : String(req.body.purpose),
+    String(req.body.purpose ?? 'login'),
   )
 
   if (!result.ok) {
@@ -226,9 +230,35 @@ app.post('/auth/2fa/verify', rateLimit({ windowMs: 60_000, limit: 10 }), async (
 app.post('/settings/telegram/unlink', async (req, res) => {
   // Proof of the factor is required to remove it: unlinking from a session
   // alone is exactly the move an attacker with a stolen session makes.
+  //
+  // Send the user a code with push(userId, PURPOSE_UNLINK) first, or let them
+  // fetch one with /code — on-demand codes satisfy any purpose.
   const result = await tfa.unlink(currentUser(req), String(req.body.code ?? ''))
 
   res.status(result.ok ? 200 : 400).json(result)
+})
+
+// ------------------------------------------------------- moving to a new chat
+
+/**
+ * The user has a new Telegram account.
+ *
+ * Linking never silently moves a verified binding, so this costs a code from
+ * the chat being replaced. Issue it with push(userId, PURPOSE_REPLACE).
+ */
+app.post('/settings/telegram/replace', rateLimit({ windowMs: 60_000, limit: 5 }), async (req, res) => {
+  const result = await tfa.startChatReplacement(
+    currentUser(req),
+    String(req.body.code ?? ''),
+  )
+
+  if (!('token' in result)) {
+    return res.status(400).json(result)
+  }
+
+  // Show this the same way as a first-time link: a button, and a QR code for a
+  // user whose new Telegram is on another device.
+  res.json({ url: result.url, expiresAt: result.expiresAt })
 })
 
 app.listen(3000, () => {

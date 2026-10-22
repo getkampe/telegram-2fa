@@ -101,9 +101,30 @@ application secret.
 **The attack.** A code that survives verification can be used again — from a
 request log, a browser history entry, a proxy cache, or the chat itself.
 
-**The mitigation.** Single use. The record is deleted the moment it verifies. A
-code is also bound to a `purpose`, so one minted to confirm a login cannot be
-presented as proof for a withdrawal.
+**The mitigation.** Single use. The record is deleted the moment it verifies.
+
+A code is also bound to a `purpose`, so one minted to confirm a login cannot be
+presented as proof for a withdrawal. Two details make that binding real rather
+than decorative:
+
+- **It cannot be skipped by omission.** `verify` defaults its purpose to `login`,
+  the same as `push`, and there is no wildcard. An implementation where omitting
+  the argument means "compare against nothing" provides no binding at all unless
+  every call site opts in, and the call site that forgets is both invisible and
+  the one that matters.
+- **Derive the purpose from the action, server-side.** If the client sends it
+  along with the code, a client can simply ask for whichever purpose its code
+  happens to carry, and the binding is back to decoration.
+
+A mismatch returns `invalid` and spends an attempt — it gets no distinct error,
+because telling a caller that a live code exists for a different step is
+information it has not proved it should have, and it is budgeted so the mismatch
+path is not a free oracle.
+
+The one exception is `on_demand`, the purpose of a code the user fetched with
+`/code`. It satisfies any purpose, because such a code cannot know what it is
+for and the user asked for it deliberately — nothing the application did caused
+it to exist.
 
 ### T5 — A link token redirected to the wrong chat or account
 
@@ -136,15 +157,31 @@ two concurrent link attempts both pass the application check, and only one can
 pass the index. The packages catch the resulting integrity error and return
 `already_linked`.
 
+Because no ordinary link flow may move a verified binding, a user with a new
+Telegram account goes through `startChatReplacement`, which costs a code from the
+chat being replaced. The flag authorising the rebinding is stored with the link
+token rather than passed to the call that resolves it — taken from the caller, it
+would make that proof step skippable by presenting an ordinary token.
+
 ### T7 — Removing the factor with a stolen session
 
 **The attack.** An attacker with a session cookie but no phone goes to settings
 and unlinks Telegram, leaving a single-factor account.
 
-**The mitigation.** `unlink` requires a current code. For genuine recovery —
-the user lost the Telegram account — `unlinkAfterExternalProof` exists, and takes
-a reason for the audit trail; the caller is responsible for the proof, and should
-require another enrolled factor or an out-of-band identity check.
+**The mitigation.** `unlink` requires a current code, verified under purpose
+`unlink`, so a code pushed to confirm a sign-in cannot remove the factor. A code
+the user fetched with `/code` works, which is what the bot's `/unlink`
+instructions tell them to do.
+
+For genuine recovery — the user lost the Telegram account —
+`unlinkAfterExternalProof` exists, and takes a reason for the audit trail; the
+caller is responsible for the proof, and should require another enrolled factor
+or an out-of-band identity check.
+
+The bot's own `/unlink` command explains where to do it and does not do it.
+Whoever holds the phone can already read the codes; letting them also remove the
+factor, with no session and no password, turns a stolen phone into a permanently
+single-factor account.
 
 ### T8 — The bot as an amplifier
 
@@ -179,6 +216,8 @@ bot added to a group never issues a code in front of its members.
       Memcached or a database table. Not `array`, not `file`.
 - [ ] The unique index on the chat id column exists. Check the migration ran.
 - [ ] The challenge and verify endpoints are rate-limited per account and per IP.
+- [ ] Every privileged action passes its own `purpose` to both `push` and
+      `verify`, and derives it server-side rather than from the request body.
 - [ ] The webhook route is excluded from CSRF — and nothing else is.
 - [ ] HTTPS everywhere. Telegram refuses to deliver to anything else; make sure
       your own redirect does not strip the secret header.

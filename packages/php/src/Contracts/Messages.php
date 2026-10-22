@@ -50,6 +50,17 @@ interface Messages
     public function cooldown(int $secondsRemaining): string;
 
     /**
+     * How to remove the factor, in answer to /unlink.
+     *
+     * The bot does not perform the removal: whoever holds the phone can
+     * already read the codes, and letting them also remove the factor with no
+     * session and no password turns a stolen phone into a permanently
+     * single-factor account. So this explains where to do it instead — which
+     * is a real answer, unlike the generic menu.
+     */
+    public function unlinkInstructions(string $appName): string;
+
+    /**
      * Notice that this chat is no longer a second factor.
      */
     public function unlinked(string $appName): string;

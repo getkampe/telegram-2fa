@@ -44,14 +44,16 @@ ported, and [docs/porting.md](docs/porting.md) is the checklist.
 Three things, each with a reason to exist.
 
 **Linking.** Binds one Telegram chat to one account, through a `t.me` deeplink the
-user taps, or a short code they copy from the bot into your settings page.
+user taps, or a short code they copy from the bot into your settings page. Moving
+to a new Telegram account is its own flow, and costs a code from the old one.
 
 **Challenge.** Issues a one-time code and delivers it to that chat — either pushed
 by your application at the moment it needs one, or pulled by the user sending
 `/code` to the bot when they would rather not wait.
 
 **Verification.** Checks a submitted code: hashed, constant-time, single-use,
-attempt-budgeted, with a cooldown between sends.
+attempt-budgeted, bound to the step it was issued for, with a cooldown between
+sends.
 
 And one more, because it is the step attackers actually use: **unlinking**
 requires proof of the factor being removed, not just a logged-in session.
@@ -102,18 +104,21 @@ class User extends Authenticatable
 ```
 
 ```php
-// Linking: show this URL as a button or a QR code.
+// Linking: show this URL as a button, and as a QR code for desktop users whose
+// Telegram is on their phone. Any QR library will do — the package does not
+// ship one, because $link->url is an ordinary string.
 $link = $user->startTelegramLink();
 return view('settings.telegram', ['url' => $link->url]);
 
-// Challenge, at the moment you need one.
+// Challenge, at the moment you need one. The purpose names the step.
 $result = $user->sendTelegramCode(purpose: 'withdrawal');
 
 if (! $result->ok) {
     return back()->withErrors($result->error->message());
 }
 
-// Verification.
+// Verification. The purpose must match what the code was issued for, so a code
+// sent to confirm a sign-in cannot approve a payout.
 $check = $user->verifyTelegramCode($request->code, purpose: 'withdrawal');
 
 if (! $check->ok) {
@@ -154,7 +159,7 @@ const { url } = await tfa.startDeepLink(user.id)
 // Challenge
 const sent = await tfa.push(user.id, 'withdrawal')
 
-// Verification
+// Verification — the purpose must match, so a sign-in code cannot approve this
 const check = await tfa.verify(user.id, submittedCode, 'withdrawal')
 ```
 
@@ -200,11 +205,15 @@ update body — and the update body is where the codes are, which is why logging
 the whole payload at `info` is the most common way a 2FA implementation leaks
 every code it has ever sent.
 
-**4. One code, one key, one use, five attempts.** Both challenge directions write
-the same store key, so either satisfies one verification; an implementation that
-writes one key and reads another appears to work while every pushed code
-silently fails. A verified code is deleted. A wrong guess spends one of five
-attempts and does **not** extend the code's life.
+**4. One code, one key, one use, five attempts, one purpose.** Both challenge
+directions write the same store key, so either satisfies one verification; an
+implementation that writes one key and reads another appears to work while every
+pushed code silently fails. A verified code is deleted. A wrong guess spends one
+of five attempts and does **not** extend the code's life. And a code is bound to
+the step it was issued for, with no way to skip that check by omitting the
+argument — a default of "compare against nothing" means the binding does nothing
+unless every call site opts in, and the call site that forgets is the one that
+matters.
 
 **5. One chat is the factor for exactly one account** — enforced by a unique
 index, not only by an application check, because two concurrent links both pass

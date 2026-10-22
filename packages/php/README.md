@@ -41,6 +41,7 @@ $link   = $user->startTelegramLink();                       // → ->url for a t
 $result = $user->completeTelegramLink($pastedCode);         // paste flow
 $sent   = $user->sendTelegramCode('withdrawal');            // challenge
 $check  = $user->verifyTelegramCode($code, 'withdrawal');   // verification
+$moved  = $user->replaceTelegramChat($code);                // move to a new account
 $gone   = $user->unlinkTelegram($code);                     // requires proof
 ```
 
@@ -122,17 +123,34 @@ $handler->on('balance', function (string $chatId, string $argument) use ($telegr
 | `completeDeepLink(string $token, string $chatId): LinkResult` | Resolve a `/start` payload. Single use. |
 | `startPasteLink(string $chatId): LinkRequest` | Bot side: mint an 8-character code bound to the chat. |
 | `completePasteLink(string $userId, string $code): LinkResult` | Authenticated page side. Rate-limit this. |
+| `startChatReplacement(string $userId, string $code): LinkRequest\|VerificationResult` | Move to a new Telegram account, proving the old one first. |
 
 ### Challenge and verification
 
 | Method | Purpose |
 | --- | --- |
 | `push(string $userId, string $purpose = 'login'): ChallengeResult` | Issue a code and send it. |
-| `pull(string $chatId): ChallengeResult` | The user asked the bot for one. |
-| `verify(string $userId, string $code, ?string $purpose = null): VerificationResult` | Check a code. |
+| `pull(string $chatId): ChallengeResult` | The user asked the bot for one; purpose `on_demand`. |
+| `verify(string $userId, string $code, string $purpose = 'login'): VerificationResult` | Check a code. |
 
 Neither challenge method returns the code, so both results are safe to serialise
 into an HTTP response.
+
+`$purpose` names the step a code authorises and is checked on every
+verification. Pass the action's own name for anything privileged:
+
+```php
+$user->sendTelegramCode('withdrawal');
+// ...
+$user->verifyTelegramCode($code, 'withdrawal');   // a login code will not pass
+```
+
+There is no "match anything" value, and the default is `login` on both sides
+rather than a wildcard. The constants are
+`TelegramTwoFactor::PURPOSE_LOGIN`, `PURPOSE_ON_DEMAND`, `PURPOSE_REPLACE` and
+`PURPOSE_UNLINK`; a code the user fetched with `/code` carries `on_demand` and
+satisfies any purpose, which is what keeps `/code` usable for confirming an
+unlink.
 
 ### State and removal
 
@@ -141,7 +159,7 @@ into an HTTP response.
 | `isLinked(string $userId): bool` | Verified link present. |
 | `identity(string $userId): ?Identity` | The binding, if any. |
 | `identityForChat(string $chatId): ?Identity` | Reverse lookup, for the webhook. |
-| `unlink(string $userId, string $code): VerificationResult` | Remove, with proof. |
+| `unlink(string $userId, string $code): VerificationResult` | Remove, with proof under purpose `unlink`. |
 | `unlinkAfterExternalProof(string $userId, string $reason): bool` | Remove, when another factor proved it. |
 
 Errors are the `ErrorCode` enum, whose values are the protocol's shared strings

@@ -173,17 +173,33 @@ Every method is async.
 | `completeDeepLink(token, chatId)` | Resolve a `/start` payload. Single use. |
 | `startPasteLink(chatId)` | Bot side: mint an 8-character code bound to the chat. |
 | `completePasteLink(userId, code)` | Authenticated page side. Rate-limit this. |
+| `startChatReplacement(userId, code)` | Move to a new Telegram account, proving the old one first. Narrow the result with `'token' in result`. |
 
 ### Challenge and verification
 
 | Method | Purpose |
 | --- | --- |
-| `push(userId, purpose?)` | Issue a code and send it. |
-| `pull(chatId)` | The user asked the bot for one. |
-| `verify(userId, code, purpose?)` | Check a code. |
+| `push(userId, purpose = 'login')` | Issue a code and send it. |
+| `pull(chatId)` | The user asked the bot for one; purpose `on_demand`. |
+| `verify(userId, code, purpose = 'login')` | Check a code. |
 
 Neither challenge method returns the code, so both results are safe to
 `JSON.stringify` into a response.
+
+`purpose` names the step a code authorises and is checked on every
+verification:
+
+```ts
+await tfa.push(user.id, 'withdrawal')
+// ...
+await tfa.verify(user.id, code, 'withdrawal')   // a login code will not pass
+```
+
+There is no "match anything" value, and the default is `login` on both sides
+rather than a wildcard. Exported constants: `PURPOSE_LOGIN`,
+`PURPOSE_ON_DEMAND`, `PURPOSE_REPLACE`, `PURPOSE_UNLINK`. A code the user
+fetched with `/code` carries `on_demand` and satisfies any purpose, which is
+what keeps `/code` usable for confirming an unlink.
 
 ### State and removal
 
@@ -191,7 +207,7 @@ Neither challenge method returns the code, so both results are safe to
 | --- | --- |
 | `isLinked(userId)` | Verified link present. |
 | `identity(userId)` / `identityForChat(chatId)` | The binding, either direction. |
-| `unlink(userId, code)` | Remove, with proof. |
+| `unlink(userId, code)` | Remove, with proof under purpose `unlink`. |
 | `unlinkAfterExternalProof(userId, reason)` | Remove, when another factor proved it. |
 
 `error` on a failed result is an `ErrorCode` — the protocol's shared strings

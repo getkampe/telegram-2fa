@@ -125,6 +125,14 @@ export interface Messages {
   alreadyLinked(): string
   notLinked(appName: string): string
   cooldown(secondsRemaining: number): string
+  /**
+   * How to remove the factor, in answer to /unlink.
+   *
+   * The bot does not perform the removal: whoever holds the phone can already
+   * read the codes, and letting them also remove the factor with no session and
+   * no password turns a stolen phone into a permanently single-factor account.
+   */
+  unlinkInstructions(appName: string): string
   unlinked(appName: string): string
   welcome(isLinked: boolean, appName: string): string
   unknownCommand(): string

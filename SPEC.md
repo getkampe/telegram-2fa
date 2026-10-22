@@ -107,6 +107,28 @@ User                  Bot / Webhook                         App
   rate-limited per session and per IP (section 7).
 - The code **MUST** be single-use and **MUST** carry a TTL of no more than 900 s.
 
+### 3.3 Replacing a linked chat
+
+A user who moves to a new Telegram account needs to rebind without losing the
+account. An implementation **MUST NOT** let a plain link flow silently move a
+verified binding to a different chat (section 2), so replacement is its own
+operation in two steps:
+
+1. **Prove the current factor.** The user submits a code from the chat being
+   replaced, verified under purpose `replace` (section 5). On success the
+   implementation mints a link token as in 3.1, marked `replace` and bound to
+   the same `user_id`.
+2. **Bind the new chat.** When that token is resolved from a different chat, the
+   implementation unlinks the old chat, binds the new one, and **SHOULD** notify
+   the old chat that it is no longer a second factor.
+
+The `replace` mark is what authorises the rebinding, and it **MUST** be carried
+by the stored token rather than supplied at resolution time — otherwise the step
+that proves possession can be skipped by presenting an ordinary token.
+
+A user who has lost access to the old chat entirely cannot complete step 1 and
+**MUST** go through the recovery path of section 8 instead.
+
 ---
 
 ## 4. Challenge
@@ -127,6 +149,10 @@ Used when the App drives the step: login, withdrawal, change of e-mail.
    with the code TTL, and `cooldown:<user_id>` with the cooldown TTL.
 5. The App sends the code to `chat_id` and returns the expiry and next-send time.
 
+`purpose` names the step the code authorises — `login`, `withdrawal`,
+`replace`, whatever the App calls it — and is checked on verification
+(section 5). It defaults to `login`.
+
 ### 4.2 pull — user asks the Bot
 
 Used when the App cannot reach Telegram at that moment, or when the user prefers it.
@@ -134,8 +160,13 @@ The user sends `/code` to the Bot.
 
 1. The webhook resolves `chat_id` to `user_id`; unknown gives a "not linked" reply.
 2. Same cooldown check as 4.1.
-3. Same generation and same Store key `code:<user_id>`.
+3. Same generation and same Store key `code:<user_id>`, with purpose `on_demand`.
 4. The Bot replies with the code.
+
+A code issued this way carries no knowledge of what the user is about to do with
+it, so `on_demand` **MUST** satisfy any requested purpose on verification. This
+is the one general-purpose code in the protocol, and it is sound because the user
+asked for it deliberately: nothing the App did caused it to exist.
 
 > **The single-key rule.** Both directions write `code:<user_id>`. An implementation
 > that writes `code:<user_id>` on push but reads some other key on verify will
@@ -147,18 +178,32 @@ The user sends `/code` to the Bot.
 
 ## 5. Verification
 
-`verify(user_id, code)` returns one of `ok`, `invalid`, `expired`,
-`too_many_attempts`.
+`verify(user_id, code, purpose)` returns one of `ok`, `invalid`, `expired`,
+`too_many_attempts`. `purpose` defaults to `login`, matching 4.1.
 
 1. Read `code:<user_id>`. Absent gives `expired`.
 2. If `attempts >= max_attempts`, give `too_many_attempts` and delete the record.
 3. If `now > expires_at`, give `expired` and delete the record.
-4. Compare `hash(code)` with the stored hash **in constant time**. A plain `==`
+4. Check the purpose. It is satisfied when the stored purpose equals the
+   requested one, or when the stored purpose is `on_demand` (4.2). Otherwise
+   treat it as a failed attempt (step 6).
+5. Compare `hash(code)` with the stored hash **in constant time**. A plain `==`
    on secret material is a timing oracle, and is also easy to write as a
    type-juggling bug in loosely typed languages.
-5. On match: delete the record, return `ok`. The code **MUST** be single-use —
+6. On match: delete the record, return `ok`. The code **MUST** be single-use —
    a code that survives verification can be replayed from a logged request body.
-6. On mismatch: increment `attempts`, keep the original TTL, return `invalid`.
+7. On mismatch: increment `attempts`, keep the original TTL, return `invalid`.
+
+The purpose check **MUST NOT** be skippable by omitting the argument. An
+implementation whose default is "compare against nothing" provides no binding at
+all unless every call site opts in, and the call site that forgets is both
+invisible and the one that matters — a code issued to confirm a sign-in
+approving a payout. Defaulting to `login` makes the common case correct and
+makes a privileged step fail loudly when its purpose was not threaded through.
+
+A failed purpose check **MUST** return `invalid` rather than a distinct error:
+telling a caller that a live code exists for a different purpose is information
+it has not proved it should have.
 
 `max_attempts` **MUST** default to 5 or fewer. A 6-digit code with unlimited
 attempts behind a 10-requests-per-minute throttle is exhausted in about 70 days of
@@ -241,7 +286,7 @@ All keys are prefixed with a configurable namespace (default `tg2fa`).
 | --- | --- | --- |
 | `<ns>:code:<user_id>` | `{ hash, expires_at, attempts, purpose }` | code TTL |
 | `<ns>:cooldown:<user_id>` | next-send unix timestamp | cooldown |
-| `<ns>:link:<hash(token)>` | `{ user_id }` (deeplink) or `{ chat_id }` (paste) | link TTL |
+| `<ns>:link:<hash(token)>` | `{ user_id }` (deeplink) or `{ chat_id }` (paste), plus `replace: true` for 3.3 | link TTL |
 | `<ns>:update:<update_id>` | `1` | retry window or longer |
 
 `user_id` is an opaque string. Implementations **MUST NOT** assume it is an integer.
@@ -272,8 +317,11 @@ can be written once against the protocol rather than against one library.
 An implementation conforms to this specification when it:
 
 - enforces the uniqueness rules of section 2 at the storage layer;
-- implements the deeplink flow of section 3.1;
+- implements the deeplink flow of section 3.1, and the replacement flow of 3.3
+  with the `replace` mark carried by the stored token;
 - writes and reads one key for both challenge directions (section 4);
+- checks the purpose on every verification, with no way to skip it by omission,
+  and treats `on_demand` as general-purpose (sections 4.2 and 5);
 - hashes codes, compares in constant time, and enforces single use and an attempt
   budget (sections 5 and 6);
 - rejects webhook requests without a valid secret token (section 7.1);

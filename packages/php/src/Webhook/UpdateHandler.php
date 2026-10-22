@@ -235,12 +235,15 @@ final class UpdateHandler
      */
     private function unlinkHint(string $chatId): bool
     {
+        if ($this->tfa->identityForChat($chatId)?->isVerified() !== true) {
+            $this->telegram->sendMessage($chatId, $this->messages->notLinked($this->config->appName));
+
+            return false;
+        }
+
         $this->telegram->sendMessage(
             $chatId,
-            $this->messages->welcome(
-                $this->tfa->identityForChat($chatId)?->isVerified() === true,
-                $this->config->appName,
-            ),
+            $this->messages->unlinkInstructions($this->config->appName),
         );
 
         return true;

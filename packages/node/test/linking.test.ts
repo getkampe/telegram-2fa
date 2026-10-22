@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { LINK_ALPHABET } from '../src/codes.js'
 import { ErrorCode } from '../src/errors.js'
+import { PURPOSE_UNLINK } from '../src/telegram-two-factor.js'
 import { harness, wrongCode } from './helpers.js'
 
 /** SPEC.md sections 2 and 3. */
@@ -134,7 +135,7 @@ describe('unlinking', () => {
   it('requires a valid code', async () => {
     const h = harness()
     await h.link()
-    await h.tfa.push('user-1')
+    await h.tfa.push('user-1', PURPOSE_UNLINK)
 
     const result = await h.tfa.unlink('user-1', wrongCode(h.lastCode()))
 
@@ -145,7 +146,7 @@ describe('unlinking', () => {
   it('removes the factor when the code is right', async () => {
     const h = harness()
     await h.link()
-    await h.tfa.push('user-1')
+    await h.tfa.push('user-1', PURPOSE_UNLINK)
 
     assert.equal((await h.tfa.unlink('user-1', h.lastCode())).ok, true)
     assert.equal(await h.tfa.isLinked('user-1'), false)
@@ -154,7 +155,7 @@ describe('unlinking', () => {
   it('notifies the chat', async () => {
     const h = harness()
     await h.link()
-    await h.tfa.push('user-1')
+    await h.tfa.push('user-1', PURPOSE_UNLINK)
 
     const code = h.lastCode()
     h.telegram.reset()
@@ -168,7 +169,7 @@ describe('unlinking', () => {
   it('clears any code in flight', async () => {
     const h = harness()
     await h.link()
-    await h.tfa.push('user-1')
+    await h.tfa.push('user-1', PURPOSE_UNLINK)
     await h.tfa.unlink('user-1', h.lastCode())
 
     assert.equal(await h.store.get(h.config.key('code', 'user-1')), null)

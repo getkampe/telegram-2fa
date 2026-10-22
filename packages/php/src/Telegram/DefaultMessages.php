@@ -79,6 +79,18 @@ class DefaultMessages implements Messages
             . 'Check the message above, or ask again in ' . $this->humanise($secondsRemaining) . '.';
     }
 
+    public function unlinkInstructions(string $appName): string
+    {
+        return "🔓 <b>Removing Telegram as your second factor</b>\n\n"
+            . 'For your security this cannot be done from the chat — anyone holding your '
+            . "phone could do it.\n\n"
+            . '1. Sign in to ' . self::escape($appName) . " and open your security settings\n"
+            . "2. Choose to remove Telegram\n"
+            . "3. Send /code here and enter that code to confirm\n\n"
+            . 'Lost access to this account instead? Contact support — they can verify you '
+            . 'another way.';
+    }
+
     public function unlinked(string $appName): string
     {
         return "🔓 <b>No longer your second factor</b>\n\n"

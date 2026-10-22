@@ -50,6 +50,24 @@ interface CodeRecord {
   purpose: string
 }
 
+/** The default purpose, for an ordinary sign-in. */
+export const PURPOSE_LOGIN = 'login'
+
+/**
+ * The purpose of a code the user fetched themselves with /code.
+ *
+ * Such a code carries no knowledge of what it is about to authorise, so it
+ * satisfies any requested purpose. That is sound because the user asked for it
+ * deliberately - nothing the application did caused it to exist.
+ */
+export const PURPOSE_ON_DEMAND = 'on_demand'
+
+/** Proving the current factor before rebinding to a new chat. */
+export const PURPOSE_REPLACE = 'replace'
+
+/** Proving the current factor before removing it. */
+export const PURPOSE_UNLINK = 'unlink'
+
 export interface TelegramTwoFactorOptions {
   config: Config
   store: CodeStore
@@ -145,7 +163,9 @@ export class TelegramTwoFactor {
   /** Finish the deeplink flow, from the /start payload in a webhook update. */
   async completeDeepLink(token: string, chatId: string): Promise<LinkResult> {
     const key = this.config.key('link', this.hasher.hash(token))
-    const record = (await this.store.get(key)) as { userId?: string; expiresAt?: number } | null
+    const record = (await this.store.get(key)) as
+      | { userId?: string; expiresAt?: number; replace?: boolean }
+      | null
 
     if (record == null || typeof record.userId !== 'string') {
       this.logger.warn('telegram-2fa: deeplink token not resolvable', { chatId })
@@ -162,7 +182,55 @@ export class TelegramTwoFactor {
     // that survives a successful attempt can be replayed.
     await this.store.forget(key)
 
-    return this.bind(record.userId, chatId)
+    return this.bind(record.userId, chatId, record.replace === true)
+  }
+
+  /**
+   * Begin moving the factor to a different Telegram account.
+   *
+   * Linking never silently moves a verified binding, because a flow that did
+   * would let anyone holding a session attach their own chat to the account. So
+   * replacement is explicit and costs a code from the chat being replaced:
+   * prove the current factor here, then resolve the returned token from the new
+   * chat.
+   *
+   * A user who has lost the old chat entirely cannot do this, and belongs in
+   * unlinkAfterExternalProof() instead.
+   *
+   * @returns the link request on success, or the verification failure that
+   *          stopped it. Narrow with `'token' in result`.
+   */
+  async startChatReplacement(
+    userId: string,
+    code: string,
+  ): Promise<LinkRequest | VerificationResult> {
+    const identity = await this.identities.findByUserId(userId)
+
+    if (!isVerified(identity)) {
+      return { ok: false, error: ErrorCode.NotLinked }
+    }
+
+    const proof = await this.verify(userId, code, PURPOSE_REPLACE)
+
+    if (!proof.ok) {
+      return proof
+    }
+
+    const token = this.codes.deepLinkToken()
+    const expiresAt = this.clock.now() + this.config.linkTtl
+
+    // The replace mark lives on the stored token, not on the call that resolves
+    // it. Taking it from the resolution side would make the proof above
+    // skippable by presenting an ordinary token.
+    await this.store.put(
+      this.config.key('link', this.hasher.hash(token)),
+      { userId, expiresAt, replace: true },
+      this.config.linkTtl,
+    )
+
+    this.logger.info('telegram-2fa: chat replacement authorised', { userId })
+
+    return { token, expiresAt, url: this.config.deepLinkUrl(token) }
   }
 
   /** Begin the paste flow, from the bot side: mint a code bound to this chat. */
@@ -208,8 +276,14 @@ export class TelegramTwoFactor {
     return this.bind(userId, record.chatId)
   }
 
-  /** Record the binding, refusing anything that would create a shared factor. */
-  private async bind(userId: string, chatId: string): Promise<LinkResult> {
+  /**
+   * Record the binding, refusing anything that would create a shared factor.
+   *
+   * @param replace Whether the token carried the replace mark of
+   *                startChatReplacement(), which is the only thing that
+   *                authorises moving a verified binding.
+   */
+  private async bind(userId: string, chatId: string, replace = false): Promise<LinkResult> {
     const existingForUser = await this.identities.findByUserId(userId)
 
     if (isVerified(existingForUser)) {
@@ -218,7 +292,19 @@ export class TelegramTwoFactor {
         return { ok: true, identity: existingForUser! }
       }
 
-      return { ok: false, error: ErrorCode.AlreadyLinked }
+      if (!replace) {
+        return { ok: false, error: ErrorCode.AlreadyLinked }
+      }
+
+      // Authorised replacement: release the old chat first so the new one can
+      // take the unique slot, and tell the old chat it is done. If the user did
+      // not request this, that message is how they find out.
+      await this.telegram.sendMessage(
+        existingForUser!.chatId,
+        this.messages.unlinked(this.config.appName),
+      )
+
+      await this.identities.unlink(userId)
     }
 
     const existingForChat = await this.identities.findByChatId(chatId)
@@ -256,7 +342,7 @@ export class TelegramTwoFactor {
    * @param purpose Recorded with the code and checked on verification, so a
    *                code issued for one step cannot prove another.
    */
-  async push(userId: string, purpose = 'login'): Promise<ChallengeResult> {
+  async push(userId: string, purpose: string = PURPOSE_LOGIN): Promise<ChallengeResult> {
     const identity = await this.identities.findByUserId(userId)
 
     if (!isVerified(identity)) {
@@ -299,7 +385,7 @@ export class TelegramTwoFactor {
    * Writes the same store key as push, so one verification call accepts a code
    * from either direction - see the single-key rule in SPEC.md section 4.
    */
-  async pull(chatId: string, purpose = 'on_demand'): Promise<ChallengeResult> {
+  async pull(chatId: string, purpose: string = PURPOSE_ON_DEMAND): Promise<ChallengeResult> {
     const identity = await this.identities.findByChatId(chatId)
 
     if (!isVerified(identity)) {
@@ -380,10 +466,20 @@ export class TelegramTwoFactor {
    * Check a submitted code.
    *
    * Single use on success, attempt-budgeted on failure, constant-time
-   * throughout. When purpose is given it must match what the code was issued
-   * for.
+   * throughout.
+   *
+   * `purpose` must match what the code was issued for, and defaults to
+   * PURPOSE_LOGIN exactly as push() does. There is deliberately no way to skip
+   * the check: a default of "compare against nothing" would mean the binding
+   * does nothing unless every call site opts in, and the call site that forgets
+   * is both invisible and the one that matters - a code issued to confirm a
+   * sign-in approving a payout.
    */
-  async verify(userId: string, code: string, purpose?: string): Promise<VerificationResult> {
+  async verify(
+    userId: string,
+    code: string,
+    purpose: string = PURPOSE_LOGIN,
+  ): Promise<VerificationResult> {
     const key = this.config.key('code', userId)
     const record = (await this.store.get(key)) as CodeRecord | null
 
@@ -404,8 +500,10 @@ export class TelegramTwoFactor {
     }
 
     // A code minted to confirm a login should not also confirm a withdrawal.
-    // Count the mismatch as an attempt rather than a free retry.
-    if (purpose !== undefined && record.purpose !== purpose) {
+    // Count the mismatch as an attempt rather than a free retry, and report it
+    // as `invalid`: telling the caller that a live code exists for some other
+    // purpose is information it has not proved it should have.
+    if (!this.purposeSatisfied(record.purpose, purpose)) {
       return this.recordFailedAttempt(key, record, attempts)
     }
 
@@ -417,6 +515,11 @@ export class TelegramTwoFactor {
     this.logger.info('telegram-2fa: verified', { userId, purpose: record.purpose })
 
     return { ok: true }
+  }
+
+  /** Whether a stored code may be used for the purpose being requested. */
+  private purposeSatisfied(stored: string, requested: string): boolean {
+    return stored === requested || stored === PURPOSE_ON_DEMAND
   }
 
   private async recordFailedAttempt(
@@ -459,7 +562,10 @@ export class TelegramTwoFactor {
       return { ok: false, error: ErrorCode.NotLinked }
     }
 
-    const result = await this.verify(userId, code)
+    // Under PURPOSE_UNLINK, so a code pushed for a login cannot remove the
+    // factor. A code the user fetched with /code still works, because
+    // on-demand codes are general-purpose.
+    const result = await this.verify(userId, code, PURPOSE_UNLINK)
 
     if (!result.ok) {
       return result

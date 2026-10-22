@@ -61,8 +61,9 @@ Never `==`.
 ### 4. The protocol
 
 `start_deep_link`, `complete_deep_link`, `start_paste_link`,
-`complete_paste_link`, `push`, `pull`, `verify`, `unlink`,
-`unlink_after_external_proof`. Clause by clause from SPEC.md sections 3 to 8.
+`complete_paste_link`, `start_chat_replacement`, `push`, `pull`, `verify`,
+`unlink`, `unlink_after_external_proof`. Clause by clause from SPEC.md sections
+3 to 8.
 
 ### 5. Webhook verification and an update handler
 
@@ -72,7 +73,7 @@ Verification is ten lines and is the most important ten lines in the port
 
 ---
 
-## The six places a port goes wrong
+## The eight places a port goes wrong
 
 These all produce an implementation that passes a manual test.
 
@@ -103,6 +104,18 @@ They are different values with different bounds — SPEC.md section 6.
 both pass the check. Put a unique constraint on the column and handle the
 integrity error as `already_linked`.
 
+**7. An optional purpose argument.** If `verify`'s purpose parameter is nullable
+and a null means "compare against nothing", then the binding does nothing unless
+every call site opts in — and the call site that forgets is both invisible and
+the one that matters, a sign-in code approving a payout. Default it to `login`,
+the same as `push`, and provide no wildcard. Remember that `on_demand` satisfies
+everything (SPEC.md 4.2), or `/code` becomes useless for confirming an unlink.
+
+**8. Taking the replace mark from the caller.** In the replacement flow (3.3) the
+`replace` flag must be read from the stored token, not from an argument to the
+resolving call. A port that accepts `complete_deep_link(token, chat_id, replace:
+true)` has made the proof step optional, which is the entire point of the flow.
+
 ---
 
 ## Testing a port
@@ -115,6 +128,10 @@ The ones that catch real bugs:
 - a verified code does not verify a second time
 - a wrong guess does not extend the code's life
 - the attempt budget destroys the code
+- a login code does not satisfy a withdrawal, and omitting the purpose means
+  login rather than a wildcard
+- an on-demand code satisfies any purpose
+- an ordinary link token cannot move an already-verified binding
 - a numerically-equal-but-textually-different code fails (catches `==` on digit
   strings in loosely typed languages)
 - a prefix and an extension of the webhook secret are both rejected

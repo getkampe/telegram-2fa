@@ -145,7 +145,10 @@ class TwoFactorController extends Controller
 {
     public function send(Request $request)
     {
-        $purpose = $request->string('purpose', 'login')->toString();
+        // Whatever action is pending decides the purpose. Record it so that
+        // verify() checks against the same value rather than one the client
+        // supplies.
+        $purpose = $request->session()->get('2fa_pending_purpose', 'login');
         $result = Auth::user()->sendTelegramCode($purpose);
 
         // Safe to return whole: the result never carries the code.
@@ -156,9 +159,14 @@ class TwoFactorController extends Controller
     {
         $request->validate(['code' => ['required', 'string']]);
 
+        // Take the purpose from the server-side context of the action being
+        // confirmed, not from the request body: a client that chooses its own
+        // purpose can simply ask for the one its code happens to carry. It is
+        // read from the session here because that is where the pending action
+        // was recorded.
         $result = Auth::user()->verifyTelegramCode(
             $request->string('code'),
-            $request->string('purpose', 'login')->toString(),
+            $request->session()->get('2fa_pending_purpose', 'login'),
         );
 
         if (! $result->ok) {
@@ -208,10 +216,44 @@ Route::post('withdrawals', WithdrawalController::class)
 ```
 
 Pass a `purpose` that names the action — `withdrawal`, not `login` — so a code
-minted to confirm a sign-in cannot be replayed to approve a payout. The library
-enforces that when you pass the same purpose to `verify`.
+minted to confirm a sign-in cannot be replayed to approve a payout:
 
-## 6. The settings view
+```php
+Route::post('withdrawals', WithdrawalController::class)
+    ->middleware(['auth', 'two-factor:5'])
+    ->defaults('2fa_purpose', 'withdrawal');
+```
+
+The purpose is checked on every verification and cannot be skipped — omitting it
+means `login`, not "anything". Derive it from the action on the server; if the
+client sends it, a client can simply ask for whichever purpose its code carries.
+
+## 6. Moving to a new Telegram account
+
+```php
+public function replace(Request $request)
+{
+    $request->validate(['code' => ['required', 'string']]);
+
+    // Costs a code from the chat being replaced. Send one first with
+    // sendTelegramCode(TelegramTwoFactor::PURPOSE_REPLACE), or tell the user
+    // to send /code to the bot — on-demand codes satisfy any purpose.
+    $result = Auth::user()->replaceTelegramChat($request->string('code'));
+
+    if ($result instanceof VerificationResult) {
+        return back()->withErrors(['code' => $result->error->message()]);
+    }
+
+    // Show it exactly like a first-time link.
+    return view('settings.telegram-replace', ['url' => $result->url]);
+}
+```
+
+A user who has lost the old Telegram account cannot complete this and needs the
+recovery path — `unlinkAfterExternalProof($userId, $reason)` after you have
+verified them another way.
+
+## 7. The settings view
 
 ```blade
 @if ($linked)
@@ -245,7 +287,7 @@ Because the deeplink completes out of band, the browser does not know when the
 user has tapped it. Poll `telegram.settings` every few seconds while that page is
 open, or push the change over a websocket.
 
-## 7. Replacing a piece
+## 8. Replacing a piece
 
 Every binding is swappable in a service provider:
 

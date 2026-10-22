@@ -33,6 +33,24 @@ use Kampe\TelegramTwoFactor\Support\SystemClock;
  */
 final class TelegramTwoFactor
 {
+    /** The default purpose, for an ordinary sign-in. */
+    public const PURPOSE_LOGIN = 'login';
+
+    /**
+     * The purpose of a code the user fetched themselves with /code.
+     *
+     * Such a code carries no knowledge of what it is about to authorise, so it
+     * satisfies any requested purpose. That is sound because the user asked for
+     * it deliberately — nothing the application did caused it to exist.
+     */
+    public const PURPOSE_ON_DEMAND = 'on_demand';
+
+    /** Proving the current factor before rebinding to a new chat. */
+    public const PURPOSE_REPLACE = 'replace';
+
+    /** Proving the current factor before removing it. */
+    public const PURPOSE_UNLINK = 'unlink';
+
     private readonly CodeGenerator $codes;
 
     private readonly CodeHasher $hasher;
@@ -144,7 +162,57 @@ final class TelegramTwoFactor
         // saw it, and a token that survives a successful one can be replayed.
         $this->store->forget($key);
 
-        return $this->bind((string) $record['user_id'], $chatId);
+        return $this->bind(
+            (string) $record['user_id'],
+            $chatId,
+            replace: ($record['replace'] ?? false) === true,
+        );
+    }
+
+    /**
+     * Begin moving the factor to a different Telegram account.
+     *
+     * Linking never silently moves a verified binding, because a flow that did
+     * would let anyone holding a session attach their own chat to the account.
+     * So replacement is explicit and costs a code from the chat being replaced:
+     * prove the current factor here, then resolve the returned token from the
+     * new chat.
+     *
+     * A user who has lost the old chat entirely cannot do this, and belongs in
+     * unlinkAfterExternalProof() instead.
+     *
+     * @return LinkRequest|VerificationResult The request on success, or the
+     *         verification failure that stopped it.
+     */
+    public function startChatReplacement(string $userId, string $code): LinkRequest|VerificationResult
+    {
+        $identity = $this->identities->findByUserId($userId);
+
+        if ($identity === null || ! $identity->isVerified()) {
+            return VerificationResult::fail(ErrorCode::NotLinked);
+        }
+
+        $proof = $this->verify($userId, $code, self::PURPOSE_REPLACE);
+
+        if (! $proof->ok) {
+            return $proof;
+        }
+
+        $token = $this->codes->deepLinkToken();
+        $expiresAt = $this->clock->now() + $this->config->linkTtl;
+
+        // The replace mark lives on the stored token, not on the call that
+        // resolves it. Taking it from the resolution side would make the proof
+        // above skippable by presenting an ordinary token.
+        $this->store->put(
+            $this->config->key('link', $this->hasher->hash($token)),
+            ['user_id' => $userId, 'expires_at' => $expiresAt, 'replace' => true],
+            $this->config->linkTtl,
+        );
+
+        $this->logger->info('telegram-2fa: chat replacement authorised', ['user_id' => $userId]);
+
+        return new LinkRequest($token, $expiresAt, $this->config->deepLinkUrl($token));
     }
 
     /**
@@ -200,8 +268,12 @@ final class TelegramTwoFactor
 
     /**
      * Record the binding, refusing anything that would create a shared factor.
+     *
+     * @param  bool  $replace  Whether the token carried the replace mark of
+     *                         startChatReplacement(), which is the only thing
+     *                         that authorises moving a verified binding.
      */
-    private function bind(string $userId, string $chatId): LinkResult
+    private function bind(string $userId, string $chatId, bool $replace = false): LinkResult
     {
         $existingForUser = $this->identities->findByUserId($userId);
 
@@ -211,7 +283,19 @@ final class TelegramTwoFactor
                 return LinkResult::linked($existingForUser);
             }
 
-            return LinkResult::failed(ErrorCode::AlreadyLinked);
+            if (! $replace) {
+                return LinkResult::failed(ErrorCode::AlreadyLinked);
+            }
+
+            // Authorised replacement: release the old chat first so the new one
+            // can take the unique slot, and tell the old chat it is done. If
+            // the user did not request this, that message is how they find out.
+            $this->telegram->sendMessage(
+                $existingForUser->chatId,
+                $this->messages->unlinked($this->config->appName),
+            );
+
+            $this->identities->unlink($userId);
         }
 
         $existingForChat = $this->identities->findByChatId($chatId);
@@ -250,7 +334,7 @@ final class TelegramTwoFactor
      *                           verification, so a code issued for one step
      *                           cannot be reported as proof of another.
      */
-    public function push(string $userId, string $purpose = 'login'): ChallengeResult
+    public function push(string $userId, string $purpose = self::PURPOSE_LOGIN): ChallengeResult
     {
         $identity = $this->identities->findByUserId($userId);
 
@@ -299,7 +383,7 @@ final class TelegramTwoFactor
      * store key as push, so one verification call accepts a code from either
      * direction — see the single-key rule in SPEC.md section 4.
      */
-    public function pull(string $chatId, string $purpose = 'on_demand'): ChallengeResult
+    public function pull(string $chatId, string $purpose = self::PURPOSE_ON_DEMAND): ChallengeResult
     {
         $identity = $this->identities->findByChatId($chatId);
 
@@ -389,11 +473,20 @@ final class TelegramTwoFactor
      * Check a submitted code.
      *
      * Single use on success, attempt-budgeted on failure, constant-time
-     * throughout. $purpose, when given, must match the purpose the code was
-     * issued for.
+     * throughout.
+     *
+     * $purpose must match what the code was issued for, and defaults to
+     * PURPOSE_LOGIN exactly as push() does. There is deliberately no way to
+     * skip the check: a default of "compare against nothing" would mean the
+     * binding does nothing unless every call site opts in, and the call site
+     * that forgets is both invisible and the one that matters — a code issued
+     * to confirm a sign-in approving a payout.
      */
-    public function verify(string $userId, string $code, ?string $purpose = null): VerificationResult
-    {
+    public function verify(
+        string $userId,
+        string $code,
+        string $purpose = self::PURPOSE_LOGIN,
+    ): VerificationResult {
         $key = $this->config->key('code', $userId);
         $record = $this->store->get($key);
 
@@ -415,9 +508,12 @@ final class TelegramTwoFactor
             return VerificationResult::fail(ErrorCode::Expired);
         }
 
-        if ($purpose !== null && ($record['purpose'] ?? null) !== $purpose) {
+        if (! $this->purposeSatisfied((string) ($record['purpose'] ?? ''), $purpose)) {
             // A code minted to confirm a login should not also confirm a
-            // withdrawal. Count it as an attempt rather than a free retry.
+            // withdrawal. Count it as an attempt rather than a free retry, and
+            // report it as `invalid`: telling the caller that a live code
+            // exists for some other purpose is information it has not proved
+            // it should have.
             return $this->recordFailedAttempt($key, $record, $attempts);
         }
 
@@ -433,6 +529,14 @@ final class TelegramTwoFactor
         ]);
 
         return VerificationResult::pass();
+    }
+
+    /**
+     * Whether a stored code may be used for the purpose being requested.
+     */
+    private function purposeSatisfied(string $stored, string $requested): bool
+    {
+        return $stored === $requested || $stored === self::PURPOSE_ON_DEMAND;
     }
 
     /**
@@ -480,7 +584,10 @@ final class TelegramTwoFactor
             return VerificationResult::fail(ErrorCode::NotLinked);
         }
 
-        $result = $this->verify($userId, $code);
+        // Under PURPOSE_UNLINK, so that a code pushed for a login cannot remove
+        // the factor. A code the user fetched with /code still works, because
+        // on-demand codes are general-purpose.
+        $result = $this->verify($userId, $code, self::PURPOSE_UNLINK);
 
         if (! $result->ok) {
             return $result;
