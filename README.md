@@ -2,11 +2,12 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP and Node.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node and C#.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
+[![.NET](https://img.shields.io/badge/.net-%E2%89%A58.0-512bd4)](packages/dotnet)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Part of the [Kampe](https://getkampe.com) ecosystem.
@@ -27,7 +28,7 @@ authenticator app, and [SECURITY.md](SECURITY.md) is explicit about what this
 factor is and is not worth.
 
 This repository is that second factor done properly: **one protocol
-specification** and **two reference implementations** that interoperate with the
+specification** and **three reference implementations** that interoperate with the
 same bot, the same storage layout and the same security properties.
 
 ```
@@ -36,6 +37,7 @@ telegram-2fa/
 ├── SECURITY.md          threat model, and the mistakes this design rules out
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
+├── packages/dotnet/     Kampe.TelegramTwoFactor   — .NET 8+, no package deps
 ├── examples/            Laravel and Express wiring, end to end
 └── docs/                bot setup, flows, porting to other languages
 ```
@@ -259,10 +261,10 @@ The proposed next-version [Basic and Advanced setup design](docs/setup-modes.md)
 lets account owners choose their verification experience while keeping shared
 security requirements. It is a design proposal, not a feature of these packages yet.
 
-The protocol is at version 1.0 and both packages implement it in full. The test
-suites are written clause by clause against the specification and are its
+The protocol is at version 1.0 and every package implements it in full. The
+test suites are written clause by clause against the specification and are its
 executable form — `composer test` in `packages/php`, `npm test` in
-`packages/node`.
+`packages/node`, `dotnet test` in `packages/dotnet`.
 
 ## Licence
 

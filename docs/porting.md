@@ -5,7 +5,7 @@ checklist for doing that in Python, Go, Rust, Ruby, Elixir, C# or anything else,
 plus the handful of places where a faithful-looking implementation goes wrong.
 
 A port that satisfies the conformance list in SPEC.md section 11 interoperates
-with the PHP and Node packages here: same bot, same store keys, same error
+with the PHP, Node and C# packages here: same bot, same store keys, same error
 strings. Two implementations can even run against one database and one Redis
 during a migration between stacks.
 
@@ -68,7 +68,8 @@ sleeps for five minutes.
 
 ### 3. Codes
 
-CSPRNG only: `secrets` in Python, `crypto/rand` in Go, `SecureRandom` in Ruby.
+CSPRNG only: `secrets` in Python, `crypto/rand` in Go, `SecureRandom` in Ruby,
+`RandomNumberGenerator` in .NET.
 Never the language's default `random` — it is seeded and predictable from prior
 output, which for a 2FA code means an attacker who has seen a few can produce the
 next.
@@ -196,7 +197,8 @@ store.
 
 ## Testing a port
 
-Work from the test names in `packages/php/tests` or `packages/node/test` — they
+Work from the test names in `packages/php/tests`, `packages/node/test` or
+`packages/dotnet/Kampe.TelegramTwoFactor.Tests` — they
 are a conformance suite in all but name, and each maps to a numbered clause.
 The ones that catch real bugs:
 
