@@ -154,6 +154,33 @@ public sealed class HttpTelegramClient : ITelegramClient, IDisposable
                 return false;
             }
 
+            // A 2xx is not an acceptance. The Bot API answers 200 with
+            // {"ok":false,...} for several refusals - a blocked bot, a chat that no
+            // longer exists - and a proxy or captive portal can answer 200 with
+            // something else entirely. Treating the status alone as success reports a
+            // code as delivered that the user never received, which is worse than a
+            // visible failure: the protocol discards the challenge on a false return,
+            // so the user can ask again, but on a false success they are left waiting
+            // for a code that does not exist until the cooldown lapses.
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+            if (!Accepted(body, out var errorCode))
+            {
+                _log.Error(
+                    "telegram-2fa: Telegram did not accept a request it answered 200 to",
+                    new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["method"] = method,
+                        // The error code, not the description: a description is
+                        // Telegram's text and the payload is ours, and the payload is
+                        // the code. Nothing here is worth the risk of the two ever
+                        // being conflated.
+                        ["error_code"] = errorCode,
+                    });
+
+                return false;
+            }
+
             return true;
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
@@ -169,6 +196,49 @@ public sealed class HttpTelegramClient : ITelegramClient, IDisposable
                     ["error"] = exception.GetType().Name,
                 });
 
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether a 200 response body is an acceptance.
+    /// </summary>
+    /// <remarks>
+    /// Requires the <c>ok</c> field to be present and true. An empty body, a body
+    /// that is not JSON, a JSON value that is not an object, and an object with no
+    /// <c>ok</c> field are all refusals: none of them is Telegram saying yes, and
+    /// guessing in the caller's favour is how a code gets reported as delivered when
+    /// it was not.
+    /// </remarks>
+    private static bool Accepted(string body, out int? errorCode)
+    {
+        errorCode = null;
+
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (document.RootElement.TryGetProperty("error_code", out var code)
+                && code.ValueKind == JsonValueKind.Number)
+            {
+                errorCode = code.GetInt32();
+            }
+
+            return document.RootElement.TryGetProperty("ok", out var ok)
+                && ok.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException)
+        {
             return false;
         }
     }

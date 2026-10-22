@@ -322,10 +322,13 @@ servers); `AddAsync` is an atomic set-if-absent that reports whether it stored,
 which makes the cooldown and the webhook's idempotency claim a reservation
 exactly one caller can win.
 
-`IRedisCommands` requires `GetDeleteAsync`, so an adapter that cannot do it in
-one round trip will not compile. The other implementations of this protocol have
-to probe a duck-typed client at construction and throw when it offers no atomic
-primitive; here the unsafe shape is unreachable rather than merely rejected.
+`IRedisCommands` requires `GetDeleteAsync`, so an adapter that supplies no
+get-and-delete at all does not type-check. Be clear about how little that proves:
+the compiler can require the method to **exist**, and it cannot check that what
+you wrote inside it is atomic. An adapter that issues a `GET` and then a `DEL`
+compiles perfectly and races exactly as a duck-typed client would. The signature
+is a prompt that makes the requirement impossible to overlook, not a guarantee —
+one server round trip, and never two calls from the adapter.
 
 `IIdentityStore` has one mutating method, `TransitionAsync`, for a related
 reason: a link/unlink pair invites read-then-write, and the window between
@@ -356,7 +359,7 @@ older servers are handled through `EVAL` in your adapter.
 dotnet test
 ```
 
-126 tests written clause by clause against the specification, including the
+146 tests written clause by clause against the specification, including the
 cross-language fixtures in `/conformance` that the other packages also read, and
 real-thread concurrency tests against the shipped stores.
 

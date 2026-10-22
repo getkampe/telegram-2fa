@@ -5,11 +5,19 @@ namespace Kampe.TelegramTwoFactor.Stores;
 /// implements.
 /// </summary>
 /// <remarks>
-/// Nominal rather than structural, which turns a runtime hazard into a compile
-/// error. The other implementations of this protocol have to probe their client at
-/// construction and throw when it offers no atomic get-and-delete, because a
-/// duck-typed client might not have one. Here an adapter that cannot do it will
-/// not compile, so the unsafe shape is unreachable rather than merely rejected.
+/// Nominal rather than structural, so an adapter that does not supply an atomic
+/// get-and-delete does not type-check. That is a weaker guarantee than it looks:
+/// the compiler can require <see cref="GetDeleteAsync"/> to <em>exist</em>, and it
+/// cannot check that what you wrote inside it is atomic. An implementation that
+/// issues a GET and then a DEL compiles perfectly and races exactly as the other
+/// ports' unsafe clients do.
+/// <para>
+/// So this is a prompt, not a proof: the signature makes the requirement
+/// impossible to overlook, and the rest is on whoever writes the adapter.
+/// Three-line summary of the obligation - one server round trip, GETDEL on Redis
+/// 6.2+, EVAL of a GET-then-DEL script on anything older, never two calls from
+/// here.
+/// </para>
 /// <para>
 /// The library depends on no Redis package. A StackExchange.Redis adapter is about
 /// twenty lines - see README.md.
