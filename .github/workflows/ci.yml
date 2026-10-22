@@ -78,6 +78,34 @@ jobs:
             exit 1
           fi
 
+      - name: Fail if the cross-language interop suite was skipped
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_DB: 15
+        run: |
+          # This is the suite that checks the bytes on the wire, which is the
+          # one thing the /conformance fixtures cannot: they seed an in-memory
+          # store, so they pass whatever the production adapter does to a value
+          # on its way to Redis. If it stops running, the claim that the
+          # implementations share a store is untested again.
+          #
+          # Not a blanket check for "skipped": exactly one test in this suite
+          # skips by design, on a server older than Redis 6.2 which has no
+          # GETDEL. More than that means the suite did not really run - most
+          # likely every test skipped because Redis was unreachable, which is
+          # the failure this guard exists for.
+          OUTPUT=$(vendor/bin/phpunit --filter RedisInteropTest --no-coverage --display-skipped)
+          echo "$OUTPUT"
+
+          SKIPPED=$(echo "$OUTPUT" | grep -oE 'Skipped: [0-9]+' | tail -1 | grep -oE '[0-9]+')
+          SKIPPED=${SKIPPED:-0}
+
+          if echo "$OUTPUT" | grep -qi 'no tests' || [ "$SKIPPED" -gt 1 ]; then
+            echo "::error::The cross-language Redis interop suite did not run ($SKIPPED skipped)."
+            exit 1
+          fi
+
   node:
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest

@@ -264,6 +264,13 @@ suites are written clause by clause against the specification and are its
 executable form — `composer test` in `packages/php`, `npm test` in
 `packages/node`.
 
+Sharing one Redis between implementations needs the right adapter. In PHP that is
+`Stores\RedisCodeStore`, which the Laravel service provider now wires by default:
+the cache-backed store works, and works only where every process touching those
+keys is PHP, because Laravel's cache serialises values in a format the other
+implementations cannot read. `packages/php/tests/Integration/RedisInteropTest`
+checks the bytes on the wire, which the `/conformance` fixtures cannot.
+
 ## Licence
 
 [MIT](LICENSE) © Joseph Uruetse

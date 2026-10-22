@@ -13,8 +13,10 @@ use Kampe\TelegramTwoFactor\Contracts\IdentityStore;
 use Kampe\TelegramTwoFactor\Contracts\Logger;
 use Kampe\TelegramTwoFactor\Contracts\Messages;
 use Kampe\TelegramTwoFactor\Contracts\TelegramClient;
+use Kampe\TelegramTwoFactor\Exceptions\ConfigurationError;
 use Kampe\TelegramTwoFactor\Laravel\Console\SetWebhookCommand;
 use Kampe\TelegramTwoFactor\Laravel\Console\TelegramStatusCommand;
+use Kampe\TelegramTwoFactor\Stores\RedisCodeStore;
 use Kampe\TelegramTwoFactor\Support\PsrLogger;
 use Kampe\TelegramTwoFactor\Telegram\DefaultMessages;
 use Kampe\TelegramTwoFactor\Telegram\HttpTelegramClient;
@@ -46,12 +48,7 @@ final class TelegramTwoFactorServiceProvider extends ServiceProvider
             $app['log']->channel($app['config']->get('telegram-2fa.log_channel') ?: null)
         ));
 
-        $this->app->singleton(CodeStore::class, fn ($app) => new CacheCodeStore(
-            $app->make(CacheFactory::class)->store(
-                $app['config']->get('telegram-2fa.cache_store') ?: null
-            ),
-            permitLocalStore: (bool) $app['config']->get('telegram-2fa.permit_local_cache_store', false),
-        ));
+        $this->app->singleton(CodeStore::class, fn ($app) => $this->makeCodeStore($app));
 
         $this->app->singleton(IdentityStore::class, fn ($app) => new EloquentIdentityStore(
             $app['config']->get('telegram-2fa.user_model'),
@@ -128,5 +125,51 @@ final class TelegramTwoFactorServiceProvider extends ServiceProvider
         return $this->app->databasePath(
             'migrations/' . date('Y_m_d_His') . '_add_telegram_two_factor_columns.php'
         );
+    }
+
+    /**
+     * Build the configured code store.
+     *
+     * Defaults to the Redis connection adapter rather than the cache one. The
+     * cache adapter is correct only for a deployment where every process
+     * touching these keys is PHP: Laravel's Redis cache serialises values with
+     * PHP's serialize(), so the records are unreadable to the Node, Python, Ruby
+     * and C# implementations, and its take is serialised behind a Laravel named
+     * lock that a process in another language never takes.
+     */
+    private function makeCodeStore(mixed $app): CodeStore
+    {
+        $choice = (string) ($app['config']->get('telegram-2fa.code_store') ?: 'redis');
+
+        if ($choice === 'cache') {
+            return new CacheCodeStore(
+                $app->make(CacheFactory::class)->store(
+                    $app['config']->get('telegram-2fa.cache_store') ?: null
+                ),
+                permitLocalStore: (bool) $app['config']->get('telegram-2fa.permit_local_cache_store', false),
+            );
+        }
+
+        if ($choice !== 'redis') {
+            throw new ConfigurationError(sprintf(
+                'telegram-2fa.code_store must be "redis" or "cache"; received "%s".',
+                $choice,
+            ));
+        }
+
+        if (! $app->bound('redis')) {
+            throw new ConfigurationError(
+                'telegram-2fa.code_store is "redis" but this application has no Redis connection. '
+                . 'Configure one, or set it to "cache" — which works, and only for a deployment '
+                . 'where every process reading these keys is PHP, because the Laravel cache '
+                . 'serialises values in a format the other implementations cannot read.'
+            );
+        }
+
+        return new RedisCodeStore(new LaravelRedisCommands(
+            $app->make('redis')->connection(
+                $app['config']->get('telegram-2fa.redis_connection') ?: null
+            )
+        ));
     }
 }
