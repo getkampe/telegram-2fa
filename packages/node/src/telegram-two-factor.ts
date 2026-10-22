@@ -319,36 +319,63 @@ export class TelegramTwoFactor {
       return { ok: false, error: ErrorCode.NotLinked }
     }
 
+    // Captured *before* verifying, because this is the enrollment the user is
+    // about to prove possession of. It is what the token must record.
+    const proven = identity!.generation
+
     const proof = await this.verify(userId, code, PURPOSE_REPLACE)
 
     if (!proof.ok) {
       return proof
     }
 
-    // Re-read: the enrollment can have moved while the code was being checked,
-    // and the token must reference the generation current when it is minted.
-    let current = await this.identities.findByUserId(userId)
-
-    if (!isVerified(current)) {
-      return { ok: false, error: ErrorCode.NotLinked }
-    }
-
-    if (current!.generation === null) {
-      // A row enrolled before the generation existed. Give it one before
-      // issuing authority over it, so the token has something concrete to
-      // reference and upgrading does not produce unvalidatable tokens.
-      current = await this.identities.transition(
+    if (proven === null) {
+      // A row enrolled before the generation existed. Assign one, conditional
+      // on it still being absent — which doubles as the check below: if
+      // anything changed the enrollment while the code was being verified, the
+      // generation is no longer null and this transition declines.
+      const assigned = await this.identities.transition(
         userId,
-        current!.chatId,
+        identity!.chatId,
         null,
         this.nextGeneration(),
       )
 
-      if (current === null) {
-        return { ok: false, error: ErrorCode.NotLinked }
+      if (assigned === null || !isVerified(assigned)) {
+        return { ok: false, error: ErrorCode.Expired }
       }
+
+      return this.mintReplacementToken(userId, assigned.generation!)
     }
 
+    // Confirm the enrollment did not move while the code was being verified,
+    // and reject if it did. What must never happen is adopting the generation
+    // read *after* verification: a recovery landing in that window would have
+    // its own new generation, and recording that would hand this token
+    // authority over an enrollment the user never proved — the recovered one.
+    const after = await this.identities.findByUserId(userId)
+
+    if (!isVerified(after) || after!.generation !== proven) {
+      this.logger.warn('telegram-2fa: enrollment changed during replacement authorisation', {
+        userId,
+      })
+
+      return { ok: false, error: ErrorCode.Expired }
+    }
+
+    return this.mintReplacementToken(userId, proven)
+  }
+
+  /**
+   * Store a replacement token against exactly one enrollment generation.
+   *
+   * Separate so that there is a single place the generation is written, and so
+   * no caller can pass one it read later than the proof.
+   */
+  private async mintReplacementToken(
+    userId: string,
+    provenGeneration: string,
+  ): Promise<LinkRequest> {
     const token = this.codes.deepLinkToken()
     const expiresAt = this.clock.now() + this.config.linkTtl
 
@@ -364,7 +391,7 @@ export class TelegramTwoFactor {
       user_id: userId,
       expires_at: expiresAt,
       replace: true,
-      generation: current!.generation,
+      generation: provenGeneration,
     }
 
     await this.store.put(

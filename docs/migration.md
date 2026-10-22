@@ -77,6 +77,13 @@ silently overwritten.
 `login` and is always checked. Any call site confirming something privileged
 must pass that action's own purpose, derived server-side.
 
+## If you implemented `CodeStore` in a language with an event loop
+
+`take` and `add` must complete their read, decision and write with nothing
+awaited in between. `await read(); write()` is two operations with a suspension
+point between them, however much it looks like one; the shipped Node store had
+exactly that bug and two concurrent verifications of one code both succeeded.
+
 ## Record format
 
 The stored challenge record gained `generation` and `challenge_id`, and field

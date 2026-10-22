@@ -245,46 +245,71 @@ final class TelegramTwoFactor
             return VerificationResult::fail(ErrorCode::NotLinked);
         }
 
+        // Captured *before* verifying, because this is the enrollment the user
+        // is about to prove possession of. It is what the token must record.
+        $proven = $identity->generation;
+
         $proof = $this->verify($userId, $code, self::PURPOSE_REPLACE);
 
         if (! $proof->ok) {
             return $proof;
         }
 
-        // Re-read: verify() may have advanced nothing, but the enrollment can
-        // have moved while we were checking the code, and the token must
-        // reference the generation that is current at the moment it is minted.
-        $identity = $this->identities->findByUserId($userId);
-
-        if ($identity === null || ! $identity->isVerified()) {
-            return VerificationResult::fail(ErrorCode::NotLinked);
-        }
-
-        if ($identity->generation === null) {
-            // A row enrolled before the generation column existed. Give it one
-            // before issuing authority over it, so the token has something
-            // concrete to reference and upgrading does not silently produce
-            // tokens that can never be validated.
-            $identity = $this->identities->transition(
+        if ($proven === null) {
+            // A row enrolled before the generation column existed. Assign one,
+            // conditional on it still being absent — which doubles as the check
+            // below: if anything changed the enrollment while the code was being
+            // verified, the generation is no longer null and this declines.
+            $assigned = $this->identities->transition(
                 $userId,
                 $identity->chatId,
                 null,
                 $this->nextGeneration(),
             );
 
-            if ($identity === null) {
-                return VerificationResult::fail(ErrorCode::NotLinked);
+            if ($assigned === null || ! $assigned->isVerified() || $assigned->generation === null) {
+                return VerificationResult::fail(ErrorCode::Expired);
             }
+
+            return $this->mintReplacementToken($userId, $assigned->generation);
         }
 
+        // Confirm the enrollment did not move while the code was being
+        // verified, and reject if it did. What must never happen is adopting
+        // the generation read *after* verification: a recovery landing in that
+        // window would have its own new generation, and recording that would
+        // hand this token authority over an enrollment the user never proved —
+        // the recovered one.
+        $after = $this->identities->findByUserId($userId);
+
+        if ($after === null || ! $after->isVerified() || ! hash_equals((string) $after->generation, $proven)) {
+            $this->logger->warning(
+                'telegram-2fa: enrollment changed during replacement authorisation',
+                ['user_id' => $userId],
+            );
+
+            return VerificationResult::fail(ErrorCode::Expired);
+        }
+
+        return $this->mintReplacementToken($userId, $proven);
+    }
+
+    /**
+     * Store a replacement token against exactly one enrollment generation.
+     *
+     * Separate so there is a single place the generation is written, and so no
+     * caller can pass one it read later than the proof.
+     */
+    private function mintReplacementToken(string $userId, string $provenGeneration): LinkRequest
+    {
         $token = $this->codes->deepLinkToken();
         $expiresAt = $this->clock->now() + $this->config->linkTtl;
 
         // The replace mark lives on the stored token, not on the call that
         // resolves it. Taking it from the resolution side would make the proof
-        // above skippable by presenting an ordinary token.
+        // skippable by presenting an ordinary token.
         //
-        // The generation pins the authority to the enrollment just proved. The
+        // The generation pins the authority to the enrollment proved. The
         // binding write repeats this as its CAS expectation, so a recovery
         // landing between here and there makes that write fail rather than
         // overwrite the recovered enrollment.
@@ -294,7 +319,7 @@ final class TelegramTwoFactor
                 'user_id' => $userId,
                 'expires_at' => $expiresAt,
                 'replace' => true,
-                'generation' => $identity->generation,
+                'generation' => $provenGeneration,
             ],
             $this->config->linkTtl,
         );

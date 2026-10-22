@@ -121,6 +121,58 @@ describe('enrollment transitions under concurrency', () => {
   })
 
   /**
+   * The window between the code being accepted and the token being written.
+   *
+   * An earlier version re-read the identity after verifying and put *that*
+   * generation into the token, meaning to fail early if anything had changed.
+   * It did the opposite: a recovery landing in that window had its own fresh
+   * generation, so the token was minted against the recovered enrollment — one
+   * the user had never proved — and went on to replace the recovered chat.
+   *
+   * The generation written is now the one captured before verification, and a
+   * change during verification is refused outright.
+   */
+  it('refuses authorisation when recovery lands between the code and the token', async () => {
+    const h = raceHarness()
+    await h.seed('victim')
+    await h.tfa.push('victim', PURPOSE_REPLACE)
+    const code = h.lastCode()
+
+    // Fire the recovery on the identity read that happens after verify().
+    let reads = 0
+    const realFind = h.identities.findByUserId.bind(h.identities)
+    h.identities.findByUserId = async (userId: string) => {
+      reads++
+
+      if (reads === 3) {
+        await h.tfa.unlinkAfterExternalProof('victim', 'support recovery')
+        const fresh = await h.tfa.startDeepLink('victim')
+        await h.tfa.completeDeepLink(fresh.token, '888000333')
+      }
+
+      return realFind(userId)
+    }
+
+    const request = await h.tfa.startChatReplacement('victim', code)
+    h.identities.findByUserId = realFind
+
+    // Either it is refused here, or the token it produced is inert. Both are
+    // acceptable; silently acquiring authority over the recovered enrollment
+    // is not.
+    if ('token' in request) {
+      const result = await h.tfa.completeDeepLink(request.token, '999000444')
+
+      assert.equal(result.ok, false, 'a token minted after recovery must not bind')
+    }
+
+    assert.equal(
+      (await h.tfa.identity('victim'))?.chatId,
+      '888000333',
+      'the recovered enrollment must survive',
+    )
+  })
+
+  /**
    * The guarantee stated in the design: preventing a stale record from being
    * written back is best-effort, but accepting one is impossible.
    *

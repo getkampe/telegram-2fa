@@ -24,6 +24,7 @@
         "illuminate/contracts": "^10.0|^11.0|^12.0",
         "illuminate/database": "^10.0|^11.0|^12.0",
         "illuminate/http": "^10.0|^11.0|^12.0",
+        "illuminate/redis": "^12.70",
         "illuminate/support": "^10.0|^11.0|^12.0",
         "phpunit/phpunit": "^10.5"
     },

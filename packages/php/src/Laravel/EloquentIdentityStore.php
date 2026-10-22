@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kampe\TelegramTwoFactor\Laravel;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
 use Illuminate\Database\QueryException;
 use Kampe\TelegramTwoFactor\Contracts\IdentityStore;
 use Kampe\TelegramTwoFactor\Exceptions\ChatAlreadyLinked;
@@ -69,7 +70,12 @@ final class EloquentIdentityStore implements IdentityStore
         try {
             $affected = $query->update([
                 $this->chatIdColumn => $chatId,
-                $this->linkedAtColumn => $chatId === null ? null : now(),
+                // Carbon::now(), not the global now() helper: that helper only
+                // exists once illuminate/support's helpers file has been
+                // autoloaded, which a full framework boot does and a package
+                // consumed outside one does not. Calling it made this a fatal
+                // error rather than a write.
+                $this->linkedAtColumn => $chatId === null ? null : Carbon::now(),
                 $this->generationColumn => $next,
             ]);
         } catch (QueryException $e) {

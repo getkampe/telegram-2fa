@@ -175,6 +175,14 @@ neither of which the user asked for. The move **MUST** therefore be a single
 write that either takes the new binding or leaves the old one untouched, and the
 old chat **MUST NOT** be told it has been unlinked until the move has succeeded.
 
+**The recorded generation is the one that was proved.** An implementation
+**MUST** capture the generation before verifying the code and record that value,
+and **MUST NOT** substitute a generation read after verification. A recovery
+landing in that window carries its own new generation, and recording it grants
+the token authority over an enrollment the user never proved. An implementation
+**MUST** also refuse to issue the token at all if the enrollment changed while
+the code was being verified.
+
 **Replacement authority does not survive its enrollment.** The token **MUST**
 record the `generation` it proved (section 2.1), and that value **MUST** be the
 expectation of the conditional transition that performs the rebinding (section
@@ -304,6 +312,12 @@ Therefore:
 A store exposing only get, put and delete is **NOT** sufficient, and an
 implementation **MUST NOT** present one as though it were. Using Redis does not
 by itself make a get-check-delete sequence atomic.
+
+Neither does writing the sequence inside one `async` function. In a
+single-threaded runtime an `await` is a suspension point: the body stops there
+and another caller runs, so `await read(); write()` interleaves exactly like two
+separate operations. An atomic primitive implemented in-process **MUST**
+complete its read, decision and write with nothing awaited in between.
 
 Nor does a framework helper that *looks* like one operation. Laravel's
 `Cache::pull()`, for example, is `get()` followed by `forget()` on every driver,

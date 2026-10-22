@@ -108,9 +108,13 @@ Two properties worth preserving if you reimplement this:
   released by the same write that takes the new binding. Authorising a
   replacement the user never finishes must not leave the account factorless, and
   neither must one that is refused because the destination is taken.
-- **The token is pinned to the binding it proved.** Once that binding changes —
+- **The token is pinned to the enrollment it proved**, by the generation
+  captured *before* the code was verified. Once that enrollment changes —
   through recovery, unlinking, or another replacement — the token is void, so
-  authority cannot outlive the factor it was granted over.
+  authority cannot outlive the factor it was granted over. Reading the
+  generation again after verifying would defeat this: a recovery landing in that
+  window has its own generation, and recording it hands the token authority over
+  the enrollment the user just recovered onto.
 - **Codes in flight are dropped when the binding moves**, since a code delivered
   to the old chat is proof held by whoever still has that chat.
 

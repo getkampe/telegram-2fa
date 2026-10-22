@@ -124,6 +124,50 @@ final class TransitionRaceTest extends TestCase
     }
 
     /**
+     * The window between the code being accepted and the token being written.
+     *
+     * An earlier version re-read the identity after verifying and put *that*
+     * generation into the token, meaning to fail early if anything had changed.
+     * It did the opposite: a recovery landing in that window had its own fresh
+     * generation, so the token was minted against the recovered enrollment —
+     * one the user had never proved — and went on to replace the recovered
+     * chat.
+     *
+     * The generation written is now the one captured before verification, and a
+     * change during verification is refused outright.
+     */
+    public function test_recovery_between_the_code_and_the_token_refuses_authorisation(): void
+    {
+        $this->seed('victim');
+        $this->tfa->push('victim', TelegramTwoFactor::PURPOSE_REPLACE);
+        $code = $this->lastCode();
+
+        // Fire the recovery on the identity read that happens after verify().
+        $this->racingIdentities->interleaveOnRead(3, function (): void {
+            $this->tfa->unlinkAfterExternalProof('victim', 'support recovery');
+            $fresh = $this->tfa->startDeepLink('victim');
+            $this->tfa->completeDeepLink($fresh->token, '888000333');
+        });
+
+        $request = $this->tfa->startChatReplacement('victim', $code);
+
+        // Either it is refused here, or the token it produced is inert. Both
+        // are acceptable; silently acquiring authority over the recovered
+        // enrollment is not.
+        if ($request instanceof LinkRequest) {
+            $result = $this->tfa->completeDeepLink($request->token, '999000444');
+
+            $this->assertFalse($result->ok, 'a token minted after recovery must not bind');
+        }
+
+        $this->assertSame(
+            '888000333',
+            $this->tfa->identity('victim')?->chatId,
+            'the recovered enrollment must survive'
+        );
+    }
+
+    /**
      * The guarantee stated in the design: preventing a stale record from being
      * written back is best-effort, but accepting one is impossible.
      *

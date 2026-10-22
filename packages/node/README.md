@@ -305,8 +305,18 @@ npm install
 npm test
 ```
 
-115 tests written clause by clause against the specification, including the
+135 tests written clause by clause against the specification, including the
 cross-language fixtures in `/conformance` that the PHP package also reads, and
-the concurrency cases in `concurrency.test.ts` and `transition-race.test.ts` —
-each of which has been checked by removing the protection it covers and
-confirming it fails.
+three kinds of concurrency test:
+
+- `memory-store.test.ts` — `Promise.all` against the **shipped** stores, with no
+  wrapper. This is the one that matters: the earlier suite tested races only
+  through a test double that opened the window by hand, which proved the core
+  coped when a race happened and nothing about whether the store prevented one.
+  It did not.
+- `concurrency.test.ts` — the core's handling of an interleaving, through that
+  double
+- `transition-race.test.ts` — enrollment transitions against recovery
+
+Each protection has been checked by removing it and confirming the matching test
+fails.

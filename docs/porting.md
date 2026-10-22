@@ -95,7 +95,7 @@ Verification is ten lines and is the most important ten lines in the port
 
 ---
 
-## The fourteen places a port goes wrong
+## The sixteen places a port goes wrong
 
 These all produce an implementation that passes a manual test.
 
@@ -171,7 +171,21 @@ from either side. Stamp each challenge with the generation and check it at
 acceptance. Then a resurrected record is inert, which is the property you can
 actually guarantee — do not claim the other one.
 
-**14. Trusting your own field names.** Write `snake_case` exactly as SPEC.md
+**14. Awaiting inside a critical section.** In a single-threaded runtime
+(JavaScript, Python's asyncio, anything with an event loop) `await` is a
+suspension point, so `await read(); write()` interleaves exactly like two
+separate operations even though it looks like one function. This package's own
+in-memory `take()` did that, under a comment claiming otherwise, and two
+concurrent verifications of one code both succeeded. Complete the read, the
+decision and the write with nothing awaited between them.
+
+**15. Testing concurrency only through your own seam.** A wrapper that opens the
+interleaving window by hand proves the core copes *when a race occurs*; it
+proves nothing about whether the store you ship prevents one. Fire two real
+operations at once — `Promise.all`, `asyncio.gather`, two goroutines — against
+the implementation you actually ship.
+
+**16. Trusting your own field names.** Write `snake_case` exactly as SPEC.md
 section 9 lists it, and check against `/conformance` rather than against your own
 output. The two reference implementations shipped with `expiresAt` and
 `expires_at` respectively, each agreed with itself, and neither could have read
@@ -206,6 +220,10 @@ The ones that catch real bugs:
 - the records in `/conformance` verify through your public API, and the records
   you write match them field for field
 - a configuration value of NaN is rejected rather than passing every bound
+- two concurrent calls to the shipped store's take yield the value once, and to
+  add reserve once — tested directly, not through a wrapper
+- a replacement token records the generation proved *before* verification, and
+  authorisation is refused when the enrollment moves during it
 - one chat cannot become the factor for a second account
 - a group chat gets no code
 

@@ -249,8 +249,20 @@ composer install
 composer test
 ```
 
-133 tests written clause by clause against the specification, including the
-cross-language fixtures in `/conformance` that the Node package also reads, the
-production Laravel cache adapter against real Illuminate stores, and the
-concurrency cases in `ConcurrencyTest` and `TransitionRaceTest` — each of which
-has been checked by removing the protection it covers and confirming it fails.
+150 tests written clause by clause against the specification:
+
+- the cross-language fixtures in `/conformance`, which the Node package reads too
+- `EloquentIdentityStoreTest` — the conditional transition and the unique index
+  against a real SQL engine (SQLite in memory), which is what caught the store
+  calling Laravel's global `now()` helper and dying wherever that helper is not
+  autoloaded
+- `CacheCodeStoreTest` — the Laravel adapter against real Illuminate stores
+- `tests/Integration/RedisCacheCodeStoreTest` — the cross-process lock against a
+  live Redis. Skipped unless `REDIS_HOST` is set; CI provides one and **fails if
+  the suite skips**, because a guarantee resting on a skipped test is not one.
+  Those 5 are the skips you see locally.
+- `ConcurrencyTest` and `TransitionRaceTest` — interleavings, driven by
+  deterministic hooks rather than sleeps
+
+Each protection has been checked by removing it and confirming the matching test
+fails.

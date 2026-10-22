@@ -25,6 +25,13 @@ final class InterleavingIdentityStore implements IdentityStore
 
     private bool $fired = false;
 
+    /** @var callable():void|null */
+    private $readHook = null;
+
+    private int $readTarget = 0;
+
+    private int $reads = 0;
+
     public function __construct(private readonly ArrayIdentityStore $inner)
     {
     }
@@ -45,8 +52,32 @@ final class InterleavingIdentityStore implements IdentityStore
         $this->fired = false;
     }
 
+    /**
+     * Run $hook once, inside the $nth findByUserId() call, before it returns.
+     *
+     * Counting reads is how a test targets one specific point in a sequence of
+     * reads — the one after a code has been accepted, say — without the core
+     * having to expose a seam for it.
+     *
+     * @param  callable():void  $hook
+     */
+    public function interleaveOnRead(int $nth, callable $hook): void
+    {
+        $this->readTarget = $nth;
+        $this->readHook = $hook;
+        $this->reads = 0;
+    }
+
     public function findByUserId(string $userId): ?Identity
     {
+        $this->reads++;
+
+        if ($this->readHook !== null && $this->reads === $this->readTarget) {
+            $hook = $this->readHook;
+            $this->readHook = null;
+            $hook();
+        }
+
         return $this->inner->findByUserId($userId);
     }
 

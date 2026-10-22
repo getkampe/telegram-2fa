@@ -14,6 +14,23 @@ import { ChatAlreadyLinked } from '../errors.js'
  * Not for production behind more than one process: each worker would hold its
  * own copy, so a code issued by one request would be invisible to the next. Use
  * Redis, or a table with an expires_at column.
+ *
+ * **Why every method body here is await-free.** These methods are `async`
+ * because the contract is, but an `await` inside one would make it a
+ * *suspension point*: the body stops, control returns to the event loop, and a
+ * second caller can run its own read before the first has written anything.
+ * An earlier version of this class did exactly that — `take()` was
+ *
+ *     const value = await this.get(key)
+ *     this.items.delete(key)
+ *
+ * and two concurrent verifications of one code both received the record and
+ * both succeeded, because the `await` on `get()` yielded between the read and
+ * the delete. The comment above it claimed there was no such gap. There was.
+ *
+ * So each body below reads, decides and writes synchronously, and only the
+ * implicit promise return happens afterwards. That is what makes `take` and
+ * `add` the atomic primitives the contract asks for.
  */
 export class MemoryCodeStore implements CodeStore {
   private items = new Map<string, { value: unknown; expiresAt: number }>()
@@ -25,18 +42,7 @@ export class MemoryCodeStore implements CodeStore {
   }
 
   async get(key: string): Promise<unknown | null> {
-    const item = this.items.get(key)
-
-    if (item === undefined) {
-      return null
-    }
-
-    if (item.expiresAt <= this.clock.now()) {
-      this.items.delete(key)
-      return null
-    }
-
-    return item.value
+    return this.readSync(key)
   }
 
   async put(key: string, value: unknown, ttlSeconds: number): Promise<void> {
@@ -47,25 +53,40 @@ export class MemoryCodeStore implements CodeStore {
     this.items.delete(key)
   }
 
-  /**
-   * Trivially atomic here: one event loop, one Map, and no await between the
-   * read and the delete for anything else to run in.
-   */
   async take(key: string): Promise<unknown | null> {
-    const value = await this.get(key)
+    // Read and delete with nothing awaited in between, so a second caller
+    // cannot observe the value this one is removing.
+    const value = this.readSync(key)
     this.items.delete(key)
 
     return value
   }
 
   async add(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
-    if ((await this.get(key)) !== null) {
+    if (this.readSync(key) !== null) {
       return false
     }
 
-    await this.put(key, value, ttlSeconds)
+    this.items.set(key, { value, expiresAt: this.clock.now() + ttlSeconds })
 
     return true
+  }
+
+  /** Synchronous read, including expiry, so callers need not await it. */
+  private readSync(key: string): unknown | null {
+    const item = this.items.get(key)
+
+    if (item === undefined) {
+      return null
+    }
+
+    if (item.expiresAt <= this.clock.now()) {
+      this.items.delete(key)
+
+      return null
+    }
+
+    return item.value
   }
 }
 
@@ -76,6 +97,10 @@ export class MemoryCodeStore implements CodeStore {
  * It models both rules a real store must enforce: one chat belongs to one
  * account, and a transition only applies when the stored generation is the one
  * the caller expected. Rows survive unlinking, because the generation has to.
+ *
+ * `transition` is await-free for the same reason as the code store above: an
+ * `await` between checking the generation and writing the new state is a
+ * suspension point, and two concurrent transitions would both pass the check.
  */
 export class MemoryIdentityStore implements IdentityStore {
   private rows = new Map<string, Identity>()
@@ -91,13 +116,7 @@ export class MemoryIdentityStore implements IdentityStore {
   }
 
   async findByChatId(chatId: string): Promise<Identity | null> {
-    for (const identity of this.rows.values()) {
-      if (identity.chatId !== null && identity.chatId === chatId) {
-        return identity
-      }
-    }
-
-    return null
+    return this.findByChatIdSync(chatId)
   }
 
   async transition(
@@ -116,7 +135,7 @@ export class MemoryIdentityStore implements IdentityStore {
     }
 
     if (chatId !== null) {
-      const holder = await this.findByChatId(chatId)
+      const holder = this.findByChatIdSync(chatId)
 
       if (holder !== null && holder.userId !== userId) {
         throw new ChatAlreadyLinked(
@@ -149,5 +168,15 @@ export class MemoryIdentityStore implements IdentityStore {
     this.rows.set(userId, identity)
 
     return identity
+  }
+
+  private findByChatIdSync(chatId: string): Identity | null {
+    for (const identity of this.rows.values()) {
+      if (identity.chatId !== null && identity.chatId === chatId) {
+        return identity
+      }
+    }
+
+    return null
   }
 }

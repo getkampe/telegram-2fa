@@ -229,10 +229,21 @@ store's own named lock, and refuses a store that cannot provide one. `array` and
 per-server respectively, so the next worker sees neither. The Node Redis store
 resolves `GETDEL`/`EVAL` at construction and throws if the client has neither.
 
+An `async` method is not automatically atomic either, and this is where the Node
+package was wrong for a while: `MemoryCodeStore.take()` read the value with
+`await this.get(key)` and then deleted it. The `await` is a suspension point, so
+two concurrent verifications both received the record and both succeeded — under
+a comment asserting there was no gap. The in-memory primitives now read, decide
+and write with nothing awaited in between, and `Promise.all` of two real calls
+is a test in the suite rather than a thought experiment.
+
 **Honest limit:** where the atomicity comes from a lock, the guarantee is
 exactly as strong as the lock driver. Redis and Memcached locks are
 cross-process; nothing in this package can verify that your Redis is not, say, a
-cluster of independent nodes behind one address.
+cluster of independent nodes behind one address. The cross-process behaviour is
+covered by an integration suite that runs against a live Redis in CI and skips
+itself elsewhere — and CI fails if it skips, because a guarantee resting on a
+skipped test is not a guarantee.
 
 ### T9 — Authority that outlives the factor it was granted over
 
@@ -248,12 +259,21 @@ proved — a random 128-bit value, changed by every transition and kept when the
 account is unlinked — and that value is the expectation of the conditional write
 that rebinds the chat.
 
-Two details, both learned the hard way. The generation must not be derived from
+Three details, all learned the hard way. The generation must not be derived from
 the state it distinguishes: a digest of the chat id and its verification
 timestamp repeats when the same chat is unlinked and relinked inside one second,
-which revives every token minted beforehand. And checking it before writing is
-not enough, because a recovery can land in between; the check has to *be* the
-write, as a compare-and-set.
+which revives every token minted beforehand. Checking it before writing is not
+enough, because a recovery can land in between; the check has to *be* the write,
+as a compare-and-set.
+
+And the generation a token records must be the one that was **proved**, captured
+before the code is verified. An earlier version re-read the enrollment
+afterwards — intending to fail early if anything had changed — and so recorded
+whatever it found, which in the case that matters is the *recovered*
+enrollment's generation. That turned a defensive read into the vulnerability it
+was meant to prevent: the token acquired authority over an enrollment the user
+had never proved, and replaced the chat the user had just recovered onto. A
+change during verification is now refused outright.
 
 The related failure is quieter: a replacement that is refused must not cost the
 user the factor they already had. Releasing the old binding before checking the
@@ -300,8 +320,15 @@ bot added to a group never issues a code in front of its members.
 
 Enforced by the adapters, with a test that fails if the protection is removed:
 
-- exactly one success among concurrent correct verifications
-- the attempt budget preserved under concurrent failures
+- exactly one success among concurrent correct verifications — asserted through
+  `Promise.all` against the shipped store, not only through a test wrapper that
+  opens the window by hand
+- every evaluated guess counted, so the attempt budget cannot be beaten by
+  parallelism. Note what this does *not* mean: firing ten guesses at once spends
+  one attempt, not ten, because only the caller holding the record has its guess
+  compared at all. A guess that is never evaluated cannot be a hit.
+- the generation a replacement token carries is the one that was proved, and
+  authorisation is refused if the enrollment moved during verification
 - every enrollment change conditional on the generation, a conflict leaving the
   current binding untouched
 - revocation surviving unlink and relink, including inside one second
@@ -314,7 +341,12 @@ Not claimed:
 - **No cross-store transaction.** The identity store and the code store are
   different systems. What makes the gap between them safe is the generation
   check at acceptance, not a distributed transaction.
-- **Lock-driver dependence**, as described in T8.
+- **Lock-driver dependence**, as described in T8. Covered against live Redis in
+  CI; **not** covered against Memcached, DynamoDB or the database driver.
+- **The SQL compare-and-set** is covered against SQLite in memory — real
+  constraints, real affected-row counts — but **not** against MySQL or
+  PostgreSQL. The unique-violation mapping checks both SQLSTATE classes those
+  use; that mapping is unverified on the real engines.
 - **No protection against a compromised Telegram account**, which is inherent to
   the factor rather than a defect — see the top of this document.
 
