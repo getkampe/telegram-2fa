@@ -18,11 +18,24 @@ namespace Kampe\TelegramTwoFactor\Contracts;
  * counter loses increments to the same lost-update race. Single use and the
  * attempt budget are the two things standing between a six-digit code and an
  * attacker, so they cannot rest on a sequence the store is free to interleave.
+ *
+ * A note on types, learned from a real Redis rather than a fake: a store is not
+ * obliged to hand back exactly the PHP type it was given. Laravel's Redis store
+ * leaves a bare numeric unserialised so that INCR still works on it, so
+ * put($k, 123) followed by get($k) yields the string '123'. Array records are
+ * PHP-serialised and keep their types, so only the bare-integer value — the
+ * cooldown — is affected. Implementations therefore need not normalise, and
+ * callers must not compare a stored numeric with ===; the library coerces where
+ * it reads one. A port that compared identity would pass every in-memory test
+ * and fail only against a real server.
  */
 interface CodeStore
 {
     /**
      * Read a value. Returns null when the key is absent or expired.
+     *
+     * May return a loosely typed equivalent of what was stored; see the note
+     * above.
      */
     public function get(string $key): mixed;
 

@@ -465,6 +465,13 @@ All keys are prefixed with a configurable namespace (default `tg2fa`).
 
 `user_id` is an opaque string. Implementations **MUST NOT** assume it is an integer.
 
+The cooldown value is a bare integer, and a Store **MAY** return a loosely typed
+equivalent of what it was given — Laravel's Redis cache, for example, returns a
+bare numeric as a numeric string, because it leaves such values unserialised so
+that `INCR` still works on them. Implementations **MUST** therefore coerce when
+reading it rather than comparing types strictly. This is the one field where it
+matters, and it is invisible to any in-memory test.
+
 **The field names above are normative, and they are `snake_case`.** They are the
 wire format: two implementations sharing one Store must agree on them, and an
 implementation that writes `expiresAt` where another reads `expires_at` has made

@@ -341,8 +341,10 @@ Not claimed:
 - **No cross-store transaction.** The identity store and the code store are
   different systems. What makes the gap between them safe is the generation
   check at acceptance, not a distributed transaction.
-- **Lock-driver dependence**, as described in T8. Covered against live Redis in
-  CI; **not** covered against Memcached, DynamoDB or the database driver.
+- **Lock-driver dependence**, as described in T8. Covered against a live Redis —
+  cross-instance lock visibility, server-enforced expiry, and the whole protocol
+  end to end over the wire — in CI and locally against Redis 5 and 7. **Not**
+  covered against Memcached, DynamoDB or the database driver.
 - **The SQL compare-and-set** is covered against SQLite in memory — real
   constraints, real affected-row counts — but **not** against MySQL or
   PostgreSQL. The unique-violation mapping checks both SQLSTATE classes those

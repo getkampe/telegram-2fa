@@ -257,10 +257,13 @@ composer test
   calling Laravel's global `now()` helper and dying wherever that helper is not
   autoloaded
 - `CacheCodeStoreTest` — the Laravel adapter against real Illuminate stores
-- `tests/Integration/RedisCacheCodeStoreTest` — the cross-process lock against a
-  live Redis. Skipped unless `REDIS_HOST` is set; CI provides one and **fails if
-  the suite skips**, because a guarantee resting on a skipped test is not one.
-  Those 5 are the skips you see locally.
+- `tests/Integration/RedisCacheCodeStoreTest` — against a live Redis: the
+  cross-instance lock, server-enforced expiry, and a whole challenge round trip
+  over the wire. Skipped unless `REDIS_HOST` is set; CI provides one and **fails
+  if the suite skips**, because a guarantee resting on a skipped test is not
+  one. It never flushes — `Cache::clear()` on a Redis store is `FLUSHDB`, which
+  would destroy the whole database rather than this suite's keys — so it is safe
+  to point at a Redis you care about.
 - `ConcurrencyTest` and `TransitionRaceTest` — interleavings, driven by
   deterministic hooks rather than sleeps
 

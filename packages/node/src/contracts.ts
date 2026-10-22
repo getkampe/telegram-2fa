@@ -59,6 +59,17 @@ export function isVerified(identity: Identity | null | undefined): boolean {
  * attacker, so they cannot rest on a sequence the store is free to interleave.
  */
 export interface CodeStore {
+  /**
+   * Read a value, or null when absent or expired.
+   *
+   * A store is not obliged to hand back exactly the type it was given. The PHP
+   * implementation's Redis adapter, for instance, returns a bare numeric as a
+   * numeric string, because Laravel leaves such values unserialised so that
+   * INCR still works on them. Callers must therefore coerce rather than compare
+   * a stored numeric with `===` — the cooldown read does. A port that compared
+   * identity would pass every in-memory test and fail only against a real
+   * server.
+   */
   get(key: string): Promise<unknown | null>
   put(key: string, value: unknown, ttlSeconds: number): Promise<void>
   forget(key: string): Promise<void>
