@@ -30,3 +30,10 @@ coverage/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/packages/python/dist/
+/packages/python/*.egg-info/

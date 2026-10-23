@@ -155,6 +155,38 @@ jobs:
       - name: Build
         run: npm run build
 
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13']
+    defaults:
+      run:
+        working-directory: packages/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Test
+        # No install step: the package has no runtime dependencies and the
+        # suite uses the standard library's unittest, so there is nothing to
+        # resolve and nothing to go stale.
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s . -t . -v
+
+      - name: Check it imports from a built wheel
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist
+          python -m pip install --quiet dist/*.whl
+          cd /tmp && python -c "import kampe_telegram_2fa as k; print(k.__version__)"
+
   # The protocol is only worth having if nothing leaks the thing it protects.
   # This fails the build on the mistakes that are easiest to reintroduce.
   secrets-hygiene:
@@ -166,7 +198,7 @@ jobs:
       - name: Reject logging a raw update body
         run: |
           if grep -rniE "log[^(]*\(.*(update|request)->all\(\)" \
-               --include='*.php' --include='*.ts' packages/*/src; then
+               --include='*.php' --include='*.ts' --include='*.py' packages/*/src; then
             echo "::error::A raw Telegram update must never be logged: it contains the codes."
             exit 1
           fi
@@ -174,7 +206,7 @@ jobs:
       - name: Reject logging a code
         run: |
           if grep -rniE "(log|console)[^(]*\([^)]*['\"]code['\"][[:space:]]*(=>|:)" \
-               --include='*.php' --include='*.ts' packages/*/src; then
+               --include='*.php' --include='*.ts' --include='*.py' packages/*/src; then
             echo "::error::A verification code must never be written to a log."
             exit 1
           fi
@@ -192,5 +224,15 @@ jobs:
           if grep -rnE '(mt_rand|[^_a-z]rand)[[:space:]]*\(|Math\.random[[:space:]]*\(' \
                --include='*.php' --include='*.ts' packages/*/src; then
             echo "::error::Use a CSPRNG: random_int, or node:crypto randomInt."
+            exit 1
+          fi
+
+      - name: Reject Python's seeded random
+        run: |
+          # `import random` in a security path is the same mistake as mt_rand:
+          # a Mersenne Twister's output is predictable from prior samples.
+          if grep -rnE '^[[:space:]]*(import random|from random import)' \
+               --include='*.py' packages/*/src; then
+            echo "::error::Use the secrets module, not random."
             exit 1
           fi

@@ -2,11 +2,12 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP and Node.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node and Python.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3776ab)](packages/python)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Part of the [Kampe](https://getkampe.com) ecosystem.
@@ -27,8 +28,8 @@ authenticator app, and [SECURITY.md](SECURITY.md) is explicit about what this
 factor is and is not worth.
 
 This repository is that second factor done properly: **one protocol
-specification** and **two reference implementations** that interoperate with the
-same bot, the same storage layout and the same security properties.
+specification** and **three reference implementations** that interoperate with
+the same bot, the same storage layout and the same security properties.
 
 ```
 telegram-2fa/
@@ -36,6 +37,8 @@ telegram-2fa/
 ├── SECURITY.md          threat model, and the mistakes this design rules out
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
+├── packages/python/     kampe-telegram-2fa        — Python 3.10+, synchronous
+├── conformance/         fixtures all three suites read, so interop is tested
 ├── examples/            Laravel and Express wiring, end to end
 └── docs/                bot setup, flows, porting to other languages
 ```
@@ -135,6 +138,33 @@ if (! $check->ok) {
 Not on Laravel? The core has no framework in it — construct
 `Kampe\TelegramTwoFactor\TelegramTwoFactor` with your own four adapters. See
 [packages/php/README.md](packages/php/README.md).
+
+### Python
+
+```bash
+pip install kampe-telegram-2fa
+```
+
+```python
+from kampe_telegram_2fa import Config, DefaultMessages, HttpTelegramClient, TelegramTwoFactor
+
+config = Config.from_env()
+tfa = TelegramTwoFactor(
+    config=config,
+    store=RedisCodeStore(redis),
+    identities=my_identity_store,       # 3 methods
+    telegram=HttpTelegramClient(config.bot_token),
+    messages=DefaultMessages(),
+)
+
+link = tfa.start_deep_link(user.id)                      # linking
+sent = tfa.push(user.id, "withdrawal")                   # challenge
+check = tfa.verify(user.id, submitted, "withdrawal")     # verification
+```
+
+Synchronous on purpose, so there is no `await` inside a critical section to get
+wrong; call it from asyncio with `asyncio.to_thread`. Details in
+[packages/python/README.md](packages/python/README.md).
 
 ### Node
 
@@ -259,10 +289,19 @@ The proposed next-version [Basic and Advanced setup design](docs/setup-modes.md)
 lets account owners choose their verification experience while keeping shared
 security requirements. It is a design proposal, not a feature of these packages yet.
 
-The protocol is at version 1.0 and both packages implement it in full. The test
-suites are written clause by clause against the specification and are its
-executable form — `composer test` in `packages/php`, `npm test` in
-`packages/node`.
+The protocol is at version 1.0 and all three packages implement it in full. The
+test suites are written clause by clause against the specification and are its
+executable form:
+
+| Package | Tests | Run it |
+| --- | --- | --- |
+| PHP | 186 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
+| Node | 141 | `npm test` in `packages/node` |
+| Python | 101 (real threads) | `PYTHONPATH=src python -m unittest discover -s . -t .` in `packages/python` |
+
+Each protection has been checked by removing it and confirming the matching
+test fails. The fixtures in [`conformance/`](conformance/records.json) are read
+by all three suites, so a field name drifting in one fails the others.
 
 Sharing one Redis between implementations needs the right adapter and a plainly
 configured client. In PHP the adapter is `Stores\RedisCodeStore`, which the
