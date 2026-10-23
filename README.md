@@ -2,11 +2,14 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP, Node and C#.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node, Python, Go, Ruby and C#.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3776ab)](packages/python)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.21-00add8)](packages/go)
+[![Ruby](https://img.shields.io/badge/ruby-%E2%89%A53.1-cc342d)](packages/ruby)
 [![.NET](https://img.shields.io/badge/.net-%E2%89%A58.0-512bd4)](packages/dotnet)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -28,8 +31,8 @@ authenticator app, and [SECURITY.md](SECURITY.md) is explicit about what this
 factor is and is not worth.
 
 This repository is that second factor done properly: **one protocol
-specification** and **three reference implementations** that interoperate with the
-same bot, the same storage layout and the same security properties.
+specification** and **six reference implementations** that interoperate with
+the same bot, the same storage layout and the same security properties.
 
 ```
 telegram-2fa/
@@ -37,7 +40,11 @@ telegram-2fa/
 ├── SECURITY.md          threat model, and the mistakes this design rules out
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
+├── packages/python/     kampe-telegram-2fa        — Python 3.10+, synchronous
+├── packages/go/         .../packages/go           — Go 1.21+, stdlib only
+├── packages/ruby/       kampe-telegram_2fa        — Ruby 3.1+, no gem deps
 ├── packages/dotnet/     Kampe.TelegramTwoFactor   — .NET 8+, no package deps
+├── conformance/         fixtures every suite reads, so interop is tested
 ├── examples/            Laravel and Express wiring, end to end
 └── docs/                bot setup, flows, porting to other languages
 ```
@@ -137,6 +144,33 @@ if (! $check->ok) {
 Not on Laravel? The core has no framework in it — construct
 `Kampe\TelegramTwoFactor\TelegramTwoFactor` with your own four adapters. See
 [packages/php/README.md](packages/php/README.md).
+
+### Python
+
+```bash
+pip install kampe-telegram-2fa
+```
+
+```python
+from kampe_telegram_2fa import Config, DefaultMessages, HttpTelegramClient, TelegramTwoFactor
+
+config = Config.from_env()
+tfa = TelegramTwoFactor(
+    config=config,
+    store=RedisCodeStore(redis),
+    identities=my_identity_store,       # 3 methods
+    telegram=HttpTelegramClient(config.bot_token),
+    messages=DefaultMessages(),
+)
+
+link = tfa.start_deep_link(user.id)                      # linking
+sent = tfa.push(user.id, "withdrawal")                   # challenge
+check = tfa.verify(user.id, submitted, "withdrawal")     # verification
+```
+
+Synchronous on purpose, so there is no `await` inside a critical section to get
+wrong; call it from asyncio with `asyncio.to_thread`. Details in
+[packages/python/README.md](packages/python/README.md).
 
 ### Node
 
@@ -263,8 +297,20 @@ security requirements. It is a design proposal, not a feature of these packages 
 
 The protocol is at version 1.0 and every package implements it in full. The
 test suites are written clause by clause against the specification and are its
-executable form — `composer test` in `packages/php`, `npm test` in
-`packages/node`, `dotnet test` in `packages/dotnet`.
+executable form:
+
+| Package | Tests | Run it |
+| --- | --- | --- |
+| PHP | 186 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
+| Node | 141 | `npm test` in `packages/node` |
+| Python | 101 (real threads) | `PYTHONPATH=src python -m unittest discover -s . -t .` in `packages/python` |
+| Go | 76 (`-race` clean) | `go test ./...` in `packages/go` |
+| Ruby | 121 (real threads) | `rake test` in `packages/ruby` |
+| C# | 146 (real threads) | `dotnet test` in `packages/dotnet` |
+
+Each protection has been checked by removing it and confirming the matching
+test fails. The fixtures in [`conformance/`](conformance/records.json) are read
+by every suite, so a field name drifting in one fails the others.
 
 Sharing one Redis between implementations needs the right adapter and a plainly
 configured client. In PHP the adapter is `Stores\RedisCodeStore`, which the

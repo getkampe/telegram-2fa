@@ -155,6 +155,105 @@ jobs:
       - name: Build
         run: npm run build
 
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13']
+    defaults:
+      run:
+        working-directory: packages/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Test
+        # No install step: the package has no runtime dependencies and the
+        # suite uses the standard library's unittest, so there is nothing to
+        # resolve and nothing to go stale.
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s . -t . -v
+
+      - name: Check it imports from a built wheel
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist
+          python -m pip install --quiet dist/*.whl
+          cd /tmp && python -c "import kampe_telegram_2fa as k; print(k.__version__)"
+
+  go:
+    name: Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.21', '1.22', '1.23']
+    defaults:
+      run:
+        working-directory: packages/go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: packages/go/go.sum
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test under the race detector
+        # The strongest concurrency check in the repository, and the reason
+        # this job exists in addition to `go test`: the detector reports
+        # unsynchronised access directly, rather than waiting for a bad
+        # interleaving to happen to occur.
+        run: go test -race ./...
+
+  ruby:
+    name: Ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.1', '3.2', '3.3', '3.4']
+    defaults:
+      run:
+        working-directory: packages/ruby
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - name: Lint every source file
+        run: find lib test -name '*.rb' -print0 | xargs -0 -n1 ruby -c > /dev/null
+
+      # Warnings on, because the suite runs real threads and Ruby reports
+      # several kinds of mistake only as a warning.
+      - name: Test
+        run: rake test
+
+      - name: Build the gem
+        run: gem build kampe-telegram_2fa.gemspec
+
   dotnet:
     name: .NET ${{ matrix.dotnet }}
     runs-on: ubuntu-latest
@@ -200,7 +299,7 @@ jobs:
       - name: Reject logging a raw update body
         run: |
           if grep -rniE "log[^(]*\(.*(update|request)->all\(\)" \
-               --include='*.php' --include='*.ts' packages/*/src; then
+               --include='*.php' --include='*.ts' --include='*.py' packages/*/src; then
             echo "::error::A raw Telegram update must never be logged: it contains the codes."
             exit 1
           fi
@@ -208,7 +307,7 @@ jobs:
       - name: Reject logging a code
         run: |
           if grep -rniE "(log|console)[^(]*\([^)]*['\"]code['\"][[:space:]]*(=>|:)" \
-               --include='*.php' --include='*.ts' packages/*/src; then
+               --include='*.php' --include='*.ts' --include='*.py' packages/*/src; then
             echo "::error::A verification code must never be written to a log."
             exit 1
           fi
@@ -226,6 +325,52 @@ jobs:
           if grep -rnE '(mt_rand|[^_a-z]rand)[[:space:]]*\(|Math\.random[[:space:]]*\(' \
                --include='*.php' --include='*.ts' packages/*/src; then
             echo "::error::Use a CSPRNG: random_int, or node:crypto randomInt."
+            exit 1
+          fi
+
+      - name: Reject Python's seeded random
+        run: |
+          # `import random` in a security path is the same mistake as mt_rand:
+          # a Mersenne Twister's output is predictable from prior samples.
+          if grep -rnE '^[[:space:]]*(import random|from random import)' \
+               --include='*.py' packages/*/src; then
+            echo "::error::Use the secrets module, not random."
+            exit 1
+          fi
+
+      - name: Reject Go's seeded random
+        run: |
+          # math/rand in a security path is the same mistake as mt_rand: a
+          # seeded generator's output is predictable from prior samples.
+          if grep -rn '"math/rand"' --include='*.go' packages/go; then
+            echo "::error::Use crypto/rand, not math/rand."
+            exit 1
+          fi
+
+      # Ruby keeps its sources in lib/, so the globs above do not reach it.
+      - name: Reject predictable randomness in Ruby
+        run: |
+          # The second alternative must not match SecureRandom, hence the
+          # explicit non-word character before Random.
+          if grep -rnE '(^|[^.[:alnum:]_])rand[[:space:]]*[(0-9]|(^|[^[:alnum:]_])Random\.' \
+               --include='*.rb' packages/ruby/lib; then
+            echo "::error::Use SecureRandom. Kernel#rand and Random are Mersenne Twisters, so their output is predictable from prior samples."
+            exit 1
+          fi
+
+      - name: Reject non-constant-time comparison of code material in Ruby
+        run: |
+          if grep -rnE '(stored_hash|expected)[[:space:]]*={2}[[:space:]]*(actual|hash\()' \
+               --include='*.rb' packages/ruby/lib; then
+            echo "::error::Compare code hashes with OpenSSL.secure_compare, not ==."
+            exit 1
+          fi
+
+      - name: Reject logging a code in Ruby
+        run: |
+          if grep -rniE '(logger|puts|warn)[^(]*\([^)]*(code:|"code")' \
+               --include='*.rb' packages/ruby/lib; then
+            echo "::error::A verification code must never be written to a log."
             exit 1
           fi
 
