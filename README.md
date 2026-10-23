@@ -303,6 +303,22 @@ Each protection has been checked by removing it and confirming the matching
 test fails. The fixtures in [`conformance/`](conformance/records.json) are read
 by all three suites, so a field name drifting in one fails the others.
 
+Sharing one Redis between implementations needs the right adapter and a plainly
+configured client. In PHP the adapter is `Stores\RedisCodeStore`, which the
+Laravel service provider now wires by default: the cache-backed store works, and
+works only where every process touching those keys is PHP, because Laravel's
+cache serialises values in a format the other implementations cannot read.
+
+The client matters too. A key prefix, a serializer or a compression setting on
+the connection changes the keys or the bytes, and a default Laravel application
+sets a prefix from `REDIS_PREFIX` — so the adapters refuse those rather than let
+them apply quietly. See [packages/php/README.md](packages/php/README.md) for what
+is refused and what can be acknowledged.
+
+`packages/php/tests/Integration/` checks the bytes on the wire, which the
+`/conformance` fixtures cannot, and does it through the adapter the service
+provider actually wires.
+
 ## Licence
 
 [MIT](LICENSE) © Joseph Uruetse
