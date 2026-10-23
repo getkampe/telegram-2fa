@@ -98,10 +98,25 @@ jobs:
           # atomicity, LaravelRedisCommandsTest covers the adapter the service
           # provider actually wires. The first version of this only had the
           # former, and every write through the default path was broken.
-          OUTPUT=$(vendor/bin/phpunit --filter 'RedisInteropTest|LaravelRedisCommandsTest' --no-coverage --display-skipped)
+          # Captured rather than run plainly, so the skip count can be read out
+          # of it. The || keeps a genuine test failure from killing the step
+          # before the output is echoed, which would leave a red X and no
+          # explanation anywhere.
+          FAILED=0
+          OUTPUT=$(vendor/bin/phpunit --filter 'RedisInteropTest|LaravelRedisCommandsTest' --no-coverage --display-skipped) || FAILED=1
           echo "$OUTPUT"
 
-          SKIPPED=$(echo "$OUTPUT" | grep -oE 'Skipped: [0-9]+' | tail -1 | grep -oE '[0-9]+')
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::The cross-language interop suites failed."
+            exit 1
+          fi
+
+          # The || true matters. A clean run prints no "Skipped:" line at all,
+          # so grep finds nothing and exits 1 - and a failing command
+          # substitution is the assignment's own exit status, which under the
+          # bash -e that Actions runs these steps with kills the step. This
+          # guard's first version failed precisely when everything passed.
+          SKIPPED=$(echo "$OUTPUT" | grep -oE 'Skipped: [0-9]+' | tail -1 | grep -oE '[0-9]+' || true)
           SKIPPED=${SKIPPED:-0}
 
           # Two skips are legitimate between them: the GETDEL path needs Redis
