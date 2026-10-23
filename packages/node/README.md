@@ -295,6 +295,13 @@ enrollment it proved. Hand the store the generation you expect and let it decide
 Node 18 or newer, for `fetch` and `AbortSignal.timeout`. Pass `fetchImpl` to
 `FetchTelegramClient` to supply your own.
 
+If you do, note that the bot token is in the request URL, because that is the API
+Telegram exposes. Global `fetch` keeps the URL out of its error message; some
+clients do not — node-fetch reports `request to <url> failed, reason: ...` with
+the token in the middle of it. The client strips the token from any error text
+before logging it or handing it back, so this is handled, but it is the reason
+that code exists.
+
 A store with atomic get-and-delete and set-if-absent. Redis 6.2+ has `GETDEL`;
 older servers are handled through `EVAL`.
 
@@ -305,7 +312,7 @@ npm install
 npm test
 ```
 
-135 tests written clause by clause against the specification, including the
+141 tests written clause by clause against the specification, including the
 cross-language fixtures in `/conformance` that the PHP package also reads, and
 three kinds of concurrency test:
 

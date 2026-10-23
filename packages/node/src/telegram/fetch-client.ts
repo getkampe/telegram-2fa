@@ -38,6 +38,26 @@ export class FetchTelegramClient implements TelegramClient {
     }
   }
 
+  /**
+   * Turn an error into text that is safe to log or to hand back.
+   *
+   * The bot token is in the request URL, because that is the API Telegram
+   * exposes. Global fetch does not put the URL in the error message - its cause
+   * carries a host at most - but fetchImpl is a documented extension point, and
+   * a client like node-fetch reports `request to <url> failed, reason: ...`
+   * with the token in the middle of it. A token in a log file is a bot anyone
+   * who can read that file can impersonate: send messages as it, re-point its
+   * webhook, read whatever is queued.
+   *
+   * So the token is removed from the text whatever shape it arrived in, rather
+   * than trusting any particular client to keep it out.
+   */
+  private reason(error: unknown): string {
+    const text = error instanceof Error ? error.message : 'unknown'
+
+    return this.botToken === '' ? text : text.split(this.botToken).join('[redacted]')
+  }
+
   async sendMessage(
     chatId: string,
     text: string,
@@ -62,7 +82,7 @@ export class FetchTelegramClient implements TelegramClient {
       // rather than thrown. The message body is never logged: for a challenge,
       // the body is the code.
       this.logger.error('telegram-2fa: sendMessage failed', {
-        reason: error instanceof Error ? error.message : 'unknown',
+        reason: this.reason(error),
       })
 
       return false
@@ -130,9 +150,7 @@ export class FetchTelegramClient implements TelegramClient {
         },
       )
     } catch (error) {
-      throw new TelegramRequestFailed(
-        `Telegram could not be reached: ${error instanceof Error ? error.message : 'unknown'}`,
-      )
+      throw new TelegramRequestFailed(`Telegram could not be reached: ${this.reason(error)}`)
     }
 
     let body: { ok?: boolean; result?: unknown; description?: string }
