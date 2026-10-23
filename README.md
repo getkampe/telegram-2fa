@@ -2,11 +2,12 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP, Node and Go.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node, Python and Go.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3776ab)](packages/python)
 [![Go](https://img.shields.io/badge/go-%E2%89%A51.21-00add8)](packages/go)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -37,6 +38,7 @@ telegram-2fa/
 ├── SECURITY.md          threat model, and the mistakes this design rules out
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
+├── packages/python/     kampe-telegram-2fa        — Python 3.10+, synchronous
 ├── packages/go/         .../packages/go           — Go 1.21+, stdlib only
 ├── conformance/         fixtures every suite reads, so interop is tested
 ├── examples/            Laravel and Express wiring, end to end
@@ -138,6 +140,33 @@ if (! $check->ok) {
 Not on Laravel? The core has no framework in it — construct
 `Kampe\TelegramTwoFactor\TelegramTwoFactor` with your own four adapters. See
 [packages/php/README.md](packages/php/README.md).
+
+### Python
+
+```bash
+pip install kampe-telegram-2fa
+```
+
+```python
+from kampe_telegram_2fa import Config, DefaultMessages, HttpTelegramClient, TelegramTwoFactor
+
+config = Config.from_env()
+tfa = TelegramTwoFactor(
+    config=config,
+    store=RedisCodeStore(redis),
+    identities=my_identity_store,       # 3 methods
+    telegram=HttpTelegramClient(config.bot_token),
+    messages=DefaultMessages(),
+)
+
+link = tfa.start_deep_link(user.id)                      # linking
+sent = tfa.push(user.id, "withdrawal")                   # challenge
+check = tfa.verify(user.id, submitted, "withdrawal")     # verification
+```
+
+Synchronous on purpose, so there is no `await` inside a critical section to get
+wrong; call it from asyncio with `asyncio.to_thread`. Details in
+[packages/python/README.md](packages/python/README.md).
 
 ### Node
 
@@ -268,8 +297,9 @@ executable form:
 
 | Package | Tests | Run it |
 | --- | --- | --- |
-| PHP | 186 (live Redis, real SQL) | `composer test` in `packages/php` |
+| PHP | 186 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
 | Node | 141 | `npm test` in `packages/node` |
+| Python | 101 (real threads) | `PYTHONPATH=src python -m unittest discover -s . -t .` in `packages/python` |
 | Go | 76 (`-race` clean) | `go test ./...` in `packages/go` |
 
 Each protection has been checked by removing it and confirming the matching
