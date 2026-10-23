@@ -268,9 +268,9 @@ executable form:
 
 | Package | Tests | Run it |
 | --- | --- | --- |
-| PHP | 152 (live Redis, real SQL) | `composer test` in `packages/php` |
-| Node | 135 | `npm test` in `packages/node` |
-| Go | 70 (`-race` clean) | `go test ./...` in `packages/go` |
+| PHP | 186 (live Redis, real SQL) | `composer test` in `packages/php` |
+| Node | 141 | `npm test` in `packages/node` |
+| Go | 76 (`-race` clean) | `go test ./...` in `packages/go` |
 
 Each protection has been checked by removing it and confirming the matching
 test fails. The fixtures in [`conformance/`](conformance/records.json) are read
