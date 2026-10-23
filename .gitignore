@@ -31,6 +31,10 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Go
+packages/go/*.test
+/packages/go/dist/
+
 # Python
 __pycache__/
 *.py[cod]

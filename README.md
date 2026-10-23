@@ -2,12 +2,13 @@
 
 # Telegram 2FA
 
-**Telegram as a second authentication factor — specified once, implemented in PHP, Node and Python.**
+**Telegram as a second authentication factor — specified once, implemented in PHP, Node, Python and Go.**
 
 [![Spec](https://img.shields.io/badge/spec-v1.0-informational)](SPEC.md)
 [![PHP](https://img.shields.io/badge/php-%E2%89%A58.1-777bb4)](packages/php)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-5fa04e)](packages/node)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3776ab)](packages/python)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.21-00add8)](packages/go)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Part of the [Kampe](https://getkampe.com) ecosystem.
@@ -38,7 +39,8 @@ telegram-2fa/
 ├── packages/php/        kampe/telegram-2fa        — PHP 8.1+, Laravel adapter
 ├── packages/node/       @kampe/telegram-2fa       — Node 18+, TypeScript
 ├── packages/python/     kampe-telegram-2fa        — Python 3.10+, synchronous
-├── conformance/         fixtures all three suites read, so interop is tested
+├── packages/go/         .../packages/go           — Go 1.21+, stdlib only
+├── conformance/         fixtures every suite reads, so interop is tested
 ├── examples/            Laravel and Express wiring, end to end
 └── docs/                bot setup, flows, porting to other languages
 ```
@@ -289,7 +291,7 @@ The proposed next-version [Basic and Advanced setup design](docs/setup-modes.md)
 lets account owners choose their verification experience while keeping shared
 security requirements. It is a design proposal, not a feature of these packages yet.
 
-The protocol is at version 1.0 and all three packages implement it in full. The
+The protocol is at version 1.0 and every package implements it in full. The
 test suites are written clause by clause against the specification and are its
 executable form:
 
@@ -298,10 +300,11 @@ executable form:
 | PHP | 186 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
 | Node | 141 | `npm test` in `packages/node` |
 | Python | 101 (real threads) | `PYTHONPATH=src python -m unittest discover -s . -t .` in `packages/python` |
+| Go | 76 (`-race` clean) | `go test ./...` in `packages/go` |
 
 Each protection has been checked by removing it and confirming the matching
 test fails. The fixtures in [`conformance/`](conformance/records.json) are read
-by all three suites, so a field name drifting in one fails the others.
+by every suite, so a field name drifting in one fails the others.
 
 Sharing one Redis between implementations needs the right adapter and a plainly
 configured client. In PHP the adapter is `Stores\RedisCodeStore`, which the

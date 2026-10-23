@@ -187,6 +187,45 @@ jobs:
           python -m pip install --quiet dist/*.whl
           cd /tmp && python -c "import kampe_telegram_2fa as k; print(k.__version__)"
 
+  go:
+    name: Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.21', '1.22', '1.23']
+    defaults:
+      run:
+        working-directory: packages/go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: packages/go/go.sum
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test under the race detector
+        # The strongest concurrency check in the repository, and the reason
+        # this job exists in addition to `go test`: the detector reports
+        # unsynchronised access directly, rather than waiting for a bad
+        # interleaving to happen to occur.
+        run: go test -race ./...
+
   # The protocol is only worth having if nothing leaks the thing it protects.
   # This fails the build on the mistakes that are easiest to reintroduce.
   secrets-hygiene:
@@ -234,5 +273,14 @@ jobs:
           if grep -rnE '^[[:space:]]*(import random|from random import)' \
                --include='*.py' packages/*/src; then
             echo "::error::Use the secrets module, not random."
+            exit 1
+          fi
+
+      - name: Reject Go's seeded random
+        run: |
+          # math/rand in a security path is the same mistake as mt_rand: a
+          # seeded generator's output is predictable from prior samples.
+          if grep -rn '"math/rand"' --include='*.go' packages/go; then
+            echo "::error::Use crypto/rand, not math/rand."
             exit 1
           fi
