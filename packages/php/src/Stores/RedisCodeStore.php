@@ -29,6 +29,21 @@ use Kampe\TelegramTwoFactor\Contracts\RedisCommands;
  * are the JSON of SPEC.md section 9, and single use rests on one server-side
  * operation that every client in every language performs identically.
  *
+ * **What it does not fix.** Going through a connection removes the *cache's*
+ * serialization and nothing else. The client itself still has options, and
+ * Laravel sets them straight from config: a serializer or compression setting
+ * wraps every value before it reaches Redis, and a key prefix — which a default
+ * Laravel application sets from REDIS_PREFIX — means the record this stores as
+ * `tg2fa:code:user-1` physically lives at `<prefix>tg2fa:code:user-1`, where no
+ * other implementation will look for it. The adapters check for all three at
+ * construction; see RedisClientOptions for what is refused and what can be
+ * acknowledged.
+ *
+ * So the physical keys match across languages only if the client applies no
+ * prefix of its own, or every client applies the same one. Namespacing belongs
+ * in Config::$keyPrefix, which every implementation honours and which is part of
+ * the key the specification describes.
+ *
  * TTLs are Redis's own, which is why each record also carries its own
  * expires_at: the two must agree, and the explicit field is what keeps expiry
  * correct against a replica whose clock has drifted.

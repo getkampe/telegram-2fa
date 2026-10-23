@@ -169,7 +169,8 @@ final class TelegramTwoFactorServiceProvider extends ServiceProvider
         return new RedisCodeStore(new LaravelRedisCommands(
             $app->make('redis')->connection(
                 $app['config']->get('telegram-2fa.redis_connection') ?: null
-            )
+            ),
+            allowKeyPrefix: (bool) $app['config']->get('telegram-2fa.allow_redis_key_prefix', false),
         ));
     }
 }

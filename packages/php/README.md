@@ -245,6 +245,32 @@ obligation the signature states and cannot enforce: `getDelete` must be a single
 server round trip. A `GET` followed by a `DEL` satisfies the interface, passes
 every single-threaded test, and races.
 
+#### The connection still has options, and they matter
+
+Using a connection instead of the cache removes the **cache's** serialization.
+It does not remove the client's own, and it does not remove key prefixes. Three
+settings will break interop, and the adapters check all three at construction
+rather than letting them apply quietly:
+
+| Setting | Effect | Verdict |
+| --- | --- | --- |
+| `options.prefix` | `tg2fa:code:u` is stored at `<prefix>tg2fa:code:u` | refused unless acknowledged |
+| `options.serializer` | every value is wrapped before it reaches Redis | refused |
+| `options.compression` | every value is deflated before it reaches Redis | refused |
+
+The prefix one is the common case, not an exotic one: a default Laravel
+application sets `options.prefix` from `REDIS_PREFIX`, which defaults to
+`<app_name>_database_`. So out of the box a Laravel app would write
+`laravel_database_tg2fa:code:user-1` while a Node process looks for
+`tg2fa:code:user-1` and finds nothing.
+
+Either give this package a connection with no prefix and namespace with
+`Config::$keyPrefix` — which every implementation honours, because it is part of
+the key the specification describes — or set
+`telegram-2fa.allow_redis_key_prefix` if every client reading these keys applies
+the same prefix. On a PHP-only deployment a prefix is harmless; it is the silence
+that was the problem.
+
 `Laravel\CacheCodeStore` is **PHP-only**, and was the default until a review
 found out why that mattered:
 

@@ -78,7 +78,7 @@ jobs:
             exit 1
           fi
 
-      - name: Fail if the cross-language interop suite was skipped
+      - name: Fail if the cross-language interop suites were skipped
         env:
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
@@ -90,18 +90,23 @@ jobs:
           # on its way to Redis. If it stops running, the claim that the
           # implementations share a store is untested again.
           #
-          # Not a blanket check for "skipped": exactly one test in this suite
-          # skips by design, on a server older than Redis 6.2 which has no
-          # GETDEL. More than that means the suite did not really run - most
-          # likely every test skipped because Redis was unreachable, which is
-          # the failure this guard exists for.
-          OUTPUT=$(vendor/bin/phpunit --filter RedisInteropTest --no-coverage --display-skipped)
+          # Not a blanket check for "skipped": a couple of tests skip by design
+          # depending on the server and client build. More than that means the
+          # suites did not really run - most likely every test skipped because
+          # Redis was unreachable, which is the failure this guard exists for.
+          # Both suites: RedisInteropTest covers the wire format and the
+          # atomicity, LaravelRedisCommandsTest covers the adapter the service
+          # provider actually wires. The first version of this only had the
+          # former, and every write through the default path was broken.
+          OUTPUT=$(vendor/bin/phpunit --filter 'RedisInteropTest|LaravelRedisCommandsTest' --no-coverage --display-skipped)
           echo "$OUTPUT"
 
           SKIPPED=$(echo "$OUTPUT" | grep -oE 'Skipped: [0-9]+' | tail -1 | grep -oE '[0-9]+')
           SKIPPED=${SKIPPED:-0}
 
-          if echo "$OUTPUT" | grep -qi 'no tests' || [ "$SKIPPED" -gt 1 ]; then
+          # Two skips are legitimate between them: the GETDEL path needs Redis
+          # 6.2, and the compression check needs an LZF-capable phpredis.
+          if echo "$OUTPUT" | grep -qi 'no tests' || [ "$SKIPPED" -gt 2 ]; then
             echo "::error::The cross-language Redis interop suite did not run ($SKIPPED skipped)."
             exit 1
           fi

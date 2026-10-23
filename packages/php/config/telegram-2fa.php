@@ -87,6 +87,31 @@ return [
     // Which Redis connection, for 'redis'. null uses the application default.
     'redis_connection' => env('TELEGRAM_2FA_REDIS_CONNECTION'),
 
+    /*
+    | Acknowledge a connection-level key prefix.
+    |
+    | A default Laravel application sets options.prefix from REDIS_PREFIX, which
+    | defaults to "<app_name>_database_". phpredis prepends it to every key, so
+    | the record SPEC.md section 9 calls "tg2fa:code:<user>" is physically stored
+    | at "<prefix>tg2fa:code:<user>" — and a Node or Go process looking where the
+    | specification says to look finds nothing.
+    |
+    | The package refuses to start rather than let that happen quietly. Two ways
+    | forward:
+    |
+    | - Give this package a Redis connection with no prefix, and namespace with
+    |   key_prefix below instead. Every implementation honours that one.
+    | - Set this to true, if every client reading these keys applies the same
+    |   prefix — which it does on a PHP-only deployment, where a prefix is
+    |   harmless.
+    |
+    | A serializer or compression setting on the connection is refused outright
+    | and cannot be acknowledged: those change the bytes, not the keys, so no
+    | other implementation could read the records at all.
+    */
+
+    'allow_redis_key_prefix' => env('TELEGRAM_2FA_ALLOW_REDIS_KEY_PREFIX', false),
+
     // Which cache store, for 'cache'. null uses the application default —
     // check what that is before relying on it.
     'cache_store' => env('TELEGRAM_2FA_CACHE_STORE'),

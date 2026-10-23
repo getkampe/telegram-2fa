@@ -32,10 +32,14 @@ final class PhpRedisCommands implements RedisCommands
      * @param  object  $redis  A \Redis, or anything with the same methods.
      * @param  bool|null  $hasGetDel  Force the GETDEL path on or off. Null
      *                                detects it, which costs one INFO call.
+     * @param  bool  $allowKeyPrefix  Acknowledge a client-level key prefix, for
+     *                                a PHP-only deployment or one where every
+     *                                client applies the same prefix.
      */
     public function __construct(
         private readonly object $redis,
         ?bool $hasGetDel = null,
+        bool $allowKeyPrefix = false,
     ) {
         foreach (['get', 'set', 'del', 'eval'] as $method) {
             if (! method_exists($this->redis, $method)) {
@@ -47,6 +51,12 @@ final class PhpRedisCommands implements RedisCommands
                 ));
             }
         }
+
+        // A raw client carries the same hazards as a framework-configured one:
+        // a serializer or compression setting changes the bytes, and a prefix
+        // changes the keys, either of which makes these records invisible to
+        // the other implementations. See RedisClientOptions.
+        RedisClientOptions::assertInteroperable($this->redis, $allowKeyPrefix);
 
         $this->hasGetDel = $hasGetDel ?? $this->detectGetDel();
     }
