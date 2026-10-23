@@ -295,8 +295,8 @@ executable form:
 
 | Package | Tests | Run it |
 | --- | --- | --- |
-| PHP | 152 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
-| Node | 135 | `npm test` in `packages/node` |
+| PHP | 186 (incl. live Redis, real SQL) | `composer test` in `packages/php` |
+| Node | 141 | `npm test` in `packages/node` |
 | Python | 101 (real threads) | `PYTHONPATH=src python -m unittest discover -s . -t .` in `packages/python` |
 
 Each protection has been checked by removing it and confirming the matching
