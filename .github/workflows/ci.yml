@@ -254,6 +254,40 @@ jobs:
       - name: Build the gem
         run: gem build kampe-telegram_2fa.gemspec
 
+  dotnet:
+    name: .NET ${{ matrix.dotnet }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dotnet: ['8.0.x', '9.0.x']
+    defaults:
+      run:
+        working-directory: packages/dotnet
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Restore
+        run: dotnet restore
+
+      # The projects already set TreatWarningsAsErrors; this is here so a change
+      # that relaxes it in one project still fails the build.
+      - name: Build
+        run: dotnet build --no-restore --configuration Release -warnaserror
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release
+
+      - name: Pack
+        run: dotnet pack Kampe.TelegramTwoFactor/Kampe.TelegramTwoFactor.csproj --no-build --configuration Release --output ./artifacts
+
   # The protocol is only worth having if nothing leaks the thing it protects.
   # This fails the build on the mistakes that are easiest to reintroduce.
   secrets-hygiene:
@@ -336,6 +370,32 @@ jobs:
         run: |
           if grep -rniE '(logger|puts|warn)[^(]*\([^)]*(code:|"code")' \
                --include='*.rb' packages/ruby/lib; then
+            echo "::error::A verification code must never be written to a log."
+            exit 1
+          fi
+
+      # C# keeps its sources under the project directory, so the src/ globs
+      # above do not reach it.
+      - name: Reject predictable randomness in C#
+        run: |
+          TARGET=packages/dotnet/Kampe.TelegramTwoFactor
+          if grep -rnE 'new Random\(|Random\.(Shared|Next)' --include='*.cs' "$TARGET"; then
+            echo "::error::Use RandomNumberGenerator. System.Random is not cryptographic, so its output is predictable from prior samples."
+            exit 1
+          fi
+
+      - name: Reject non-constant-time comparison of code material in C#
+        run: |
+          TARGET=packages/dotnet/Kampe.TelegramTwoFactor
+          if grep -rnE '(storedHash|expected)[[:space:]]*={2}[[:space:]]*(actual|Hash\()' --include='*.cs' "$TARGET"; then
+            echo "::error::Compare code hashes with CryptographicOperations.FixedTimeEquals, not ==."
+            exit 1
+          fi
+
+      - name: Reject logging a code in C#
+        run: |
+          TARGET=packages/dotnet/Kampe.TelegramTwoFactor
+          if grep -rniE '(_log|logger)\.[A-Za-z]+\([^)]*"code"\]?[[:space:]]*=[^=]' --include='*.cs' "$TARGET"; then
             echo "::error::A verification code must never be written to a log."
             exit 1
           fi

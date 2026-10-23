@@ -8,6 +8,9 @@
 /packages/node/dist/
 /packages/ruby/*.gem
 /packages/ruby/pkg/
+/packages/dotnet/**/bin/
+/packages/dotnet/**/obj/
+/packages/dotnet/**/artifacts/
 
 # Lock files for a library: applications pin, libraries do not
 /packages/php/composer.lock
