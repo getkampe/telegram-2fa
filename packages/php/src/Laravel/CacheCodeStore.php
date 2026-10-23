@@ -17,6 +17,27 @@ use Kampe\TelegramTwoFactor\Exceptions\StoreContention;
 /**
  * Backs the code store with Laravel's cache.
  *
+ * **PHP-only.** Prefer RedisCodeStore, which is what the service provider now
+ * wires by default. This class is correct for a deployment where every process
+ * that touches these keys is PHP, and it is wrong for any other, in two ways
+ * that a single-language test suite cannot see:
+ *
+ * - **Encoding.** Laravel's Redis cache runs values through serialize(), so a
+ *   record lands as `a:6:{s:4:"hash";...}`. Every other implementation of this
+ *   protocol reads and writes the JSON of SPEC.md section 9, so its records are
+ *   unreadable to them and theirs to it. The shared fixtures in /conformance did
+ *   not catch this: they check the shape of a record against an in-memory store,
+ *   not the bytes the production adapter puts on the wire.
+ * - **Atomicity.** The take below is serialised behind the store's own named
+ *   lock. That holds between PHP processes and means nothing to a Node or Go
+ *   process, which issues GETDEL and never takes the lock — so the two can
+ *   interleave and one code can be accepted twice.
+ *
+ * Neither is a reason to delete it: on a Laravel-only deployment the lock is a
+ * real guarantee across workers and machines, and the cache abstraction lets it
+ * run on Memcached or DynamoDB as well as Redis. But reach for it deliberately,
+ * by setting telegram-2fa.code_store to 'cache', rather than by default.
+ *
  * The interesting part of this class is what it does *not* use.
  * Repository::pull() looks like an atomic take, and is not: it is
  *

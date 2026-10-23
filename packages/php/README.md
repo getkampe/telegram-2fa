@@ -5,7 +5,8 @@ with a Laravel adapter included and no required dependencies.
 
 Implements [SPEC.md](../../SPEC.md) v1.0. The
 [Node package](../node) in the same repository implements the same protocol, so
-both can run against one bot and one database.
+both can run against one bot and one database — see
+`Stores\RedisCodeStore` for the adapter that makes that true in production.
 
 ```bash
 composer require kampe/telegram-2fa
@@ -172,7 +173,7 @@ show a user.
 
 | Interface | Methods | Bundled implementations |
 | --- | --- | --- |
-| `CodeStore` | `get`, `put`, `forget`, `take`, `add` | `Stores\ArrayCodeStore`, `Laravel\CacheCodeStore` |
+| `CodeStore` | `get`, `put`, `forget`, `take`, `add` | `Stores\RedisCodeStore` (**use this one**), `Stores\ArrayCodeStore`, `Laravel\CacheCodeStore` (PHP-only) |
 | `IdentityStore` | `findByUserId`, `findByChatId`, `transition` | `Stores\ArrayIdentityStore`, `Laravel\EloquentIdentityStore` |
 | `TelegramClient` | `sendMessage`, `answerCallbackQuery`, `getMe`, `setWebhook`, `deleteWebhook` | `Telegram\HttpTelegramClient` (curl) |
 | `Messages` | 11 string methods | `Telegram\DefaultMessages` (English) |
@@ -217,16 +218,80 @@ attempt counter loses increments to the same lost update.
 stored, which makes the cooldown and the webhook claim a reservation exactly one
 caller can win.
 
-On Laravel this means the `redis` or `memcached` cache store, and `CacheCodeStore`
-refuses anything that cannot give it a lock — `array` and `file` outright, since
-their data and their locks are per-process and per-server.
+### Two Redis adapters, and which to use
 
-It does not use `Cache::pull()`. That helper reads like an atomic take and is
-`get()` then `forget()` on every driver, so a verification built on it races
-exactly as a hand-written pair would; an earlier revision of this package was
-built on it and claimed otherwise in a comment. Every mutation is instead
-serialised behind the store's own named lock, which means the guarantee is as
-strong as the lock driver and no stronger.
+`Stores\RedisCodeStore` is the canonical one and what the service provider wires
+by default. It talks to a Redis connection directly: values are the JSON of
+[SPEC.md section 9](../../SPEC.md) and `take` is one server-side operation
+(`GETDEL`, or `EVAL` of a GET-then-DEL script on servers before 6.2). That is
+what lets this package share a Redis and a bot with the Node, Python, Ruby and C#
+implementations.
+
+```php
+use Illuminate\Support\Facades\Redis;
+use Kampe\TelegramTwoFactor\Laravel\LaravelRedisCommands;
+use Kampe\TelegramTwoFactor\Stores\PhpRedisCommands;
+use Kampe\TelegramTwoFactor\Stores\RedisCodeStore;
+
+// Plain PHP, with ext-redis:
+$store = new RedisCodeStore(new PhpRedisCommands($redis));
+
+// Laravel, through the connection rather than the cache:
+$store = new RedisCodeStore(new LaravelRedisCommands(Redis::connection()));
+```
+
+Any other client is four methods — implement `Contracts\RedisCommands`. The one
+obligation the signature states and cannot enforce: `getDelete` must be a single
+server round trip. A `GET` followed by a `DEL` satisfies the interface, passes
+every single-threaded test, and races.
+
+#### The connection still has options, and they matter
+
+Using a connection instead of the cache removes the **cache's** serialization.
+It does not remove the client's own, and it does not remove key prefixes. Three
+settings will break interop, and the adapters check all three at construction
+rather than letting them apply quietly:
+
+| Setting | Effect | Verdict |
+| --- | --- | --- |
+| `options.prefix` | `tg2fa:code:u` is stored at `<prefix>tg2fa:code:u` | refused unless acknowledged |
+| `options.serializer` | every value is wrapped before it reaches Redis | refused |
+| `options.compression` | every value is deflated before it reaches Redis | refused |
+
+The prefix one is the common case, not an exotic one: a default Laravel
+application sets `options.prefix` from `REDIS_PREFIX`, which defaults to
+`<app_name>_database_`. So out of the box a Laravel app would write
+`laravel_database_tg2fa:code:user-1` while a Node process looks for
+`tg2fa:code:user-1` and finds nothing.
+
+Either give this package a connection with no prefix and namespace with
+`Config::$keyPrefix` — which every implementation honours, because it is part of
+the key the specification describes — or set
+`telegram-2fa.allow_redis_key_prefix` if every client reading these keys applies
+the same prefix. On a PHP-only deployment a prefix is harmless; it is the silence
+that was the problem.
+
+`Laravel\CacheCodeStore` is **PHP-only**, and was the default until a review
+found out why that mattered:
+
+- Laravel's Redis cache runs values through `serialize()`, so a record lands as
+  `a:6:{s:4:"hash";...}` rather than JSON. The other implementations cannot read
+  it and it cannot read theirs. The `/conformance` fixtures did not catch this,
+  because they check a record's *shape* against an in-memory store rather than
+  the bytes the production adapter puts on the wire — `tests/Integration/RedisInteropTest`
+  now checks the bytes.
+- Its `take` is serialised behind Laravel's named lock. That is a real guarantee
+  between PHP processes and meaningless to a Node process issuing `GETDEL`, which
+  never takes the lock, so the two can interleave over one code.
+
+It stays because on a Laravel-only deployment the lock does hold across workers
+and machines, and the cache abstraction lets it run on Memcached or DynamoDB. Opt
+in with `telegram-2fa.code_store => 'cache'`.
+
+Either way it does not use `Cache::pull()`. That helper reads like an atomic take
+and is `get()` then `forget()` on every driver, so a verification built on it
+races exactly as a hand-written pair would; an earlier revision of this package
+was built on it and claimed otherwise in a comment.
 
 `IdentityStore` has one mutating method for the same family of reasons: a
 `link`/`unlink` pair invites read-then-write, and the window between validating
@@ -257,6 +322,13 @@ composer test
   calling Laravel's global `now()` helper and dying wherever that helper is not
   autoloaded
 - `CacheCodeStoreTest` — the Laravel adapter against real Illuminate stores
+- `tests/Integration/RedisInteropTest` — against a live Redis, the bytes on the
+  wire in both directions, plus eight real OS processes racing one key. This is
+  the suite the `/conformance` fixtures could not be: they seed an in-memory
+  store, so they pass whatever an adapter does to a value on its way to the
+  server. CI **fails if it skips**
+- `CodeStoreSelectionTest` — which store the service provider wires, because a
+  correct adapter that nothing resolves by default changes nothing in production
 - `tests/Integration/RedisCacheCodeStoreTest` — against a live Redis: the
   cross-instance lock, server-enforced expiry, and a whole challenge round trip
   over the wire. Skipped unless `REDIS_HOST` is set; CI provides one and **fails

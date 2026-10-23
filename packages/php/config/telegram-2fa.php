@@ -49,8 +49,7 @@ return [
     | Storage
     |--------------------------------------------------------------------------
     |
-    | Codes live in the cache. Use redis or memcached. Two requirements, and the
-    | second is not a preference:
+    | Codes live in Redis. Two requirements, and the second is not a preference:
     |
     | 1. Shared between processes and surviving a deploy. On `array` the store
     |    is per-process and on `file` it is per-server, so a code issued by one
@@ -67,6 +66,54 @@ return [
     |
     */
 
+    /*
+    | Which adapter stores the codes.
+    |
+    | 'redis'  The canonical one, and the default. Talks to a Redis connection
+    |          directly: values are the JSON of SPEC.md section 9 and single use
+    |          rests on one server-side operation, so the PHP, Node, Python, Ruby
+    |          and C# implementations can all share one Redis and one bot.
+    |
+    | 'cache'  Laravel's cache, through CacheCodeStore. Correct for a deployment
+    |          where every process touching these keys is PHP, and *only* that:
+    |          Laravel's Redis cache serialises values with PHP's serialize(), so
+    |          the records are unreadable to the other implementations, and the
+    |          take is serialised behind a Laravel named lock that a process in
+    |          another language does not take.
+    */
+
+    'code_store' => env('TELEGRAM_2FA_CODE_STORE', 'redis'),
+
+    // Which Redis connection, for 'redis'. null uses the application default.
+    'redis_connection' => env('TELEGRAM_2FA_REDIS_CONNECTION'),
+
+    /*
+    | Acknowledge a connection-level key prefix.
+    |
+    | A default Laravel application sets options.prefix from REDIS_PREFIX, which
+    | defaults to "<app_name>_database_". phpredis prepends it to every key, so
+    | the record SPEC.md section 9 calls "tg2fa:code:<user>" is physically stored
+    | at "<prefix>tg2fa:code:<user>" — and a Node or Go process looking where the
+    | specification says to look finds nothing.
+    |
+    | The package refuses to start rather than let that happen quietly. Two ways
+    | forward:
+    |
+    | - Give this package a Redis connection with no prefix, and namespace with
+    |   key_prefix below instead. Every implementation honours that one.
+    | - Set this to true, if every client reading these keys applies the same
+    |   prefix — which it does on a PHP-only deployment, where a prefix is
+    |   harmless.
+    |
+    | A serializer or compression setting on the connection is refused outright
+    | and cannot be acknowledged: those change the bytes, not the keys, so no
+    | other implementation could read the records at all.
+    */
+
+    'allow_redis_key_prefix' => env('TELEGRAM_2FA_ALLOW_REDIS_KEY_PREFIX', false),
+
+    // Which cache store, for 'cache'. null uses the application default —
+    // check what that is before relying on it.
     'cache_store' => env('TELEGRAM_2FA_CACHE_STORE'),
 
     'user_model' => env('TELEGRAM_2FA_USER_MODEL', 'App\\Models\\User'),
